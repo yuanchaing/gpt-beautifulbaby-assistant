@@ -26,8 +26,12 @@ app.use((req, res, next) => {
 });
 
 // -------- JSON parser（除 /webhook 外）--------
+function isWebhookPath(p) {
+  const w = config.APP_WEBHOOK_PATH || '/webhook';
+  return p === w || p === `/api${w}`;
+}
 app.use((req, res, next) => {
-  if (req.path === (config.APP_WEBHOOK_PATH || '/webhook')) return next();
+  if (isWebhookPath(req.path)) return next();
   if (req.headers['content-type']?.includes('application/json')) {
     try { req.body = JSON.parse(req.rawBody?.toString() || '{}'); }
     catch { req.body = {}; }
@@ -35,8 +39,13 @@ app.use((req, res, next) => {
   next();
 });
 
-// -------- 基本資訊（對外: GET /api → 會到這裡的 "/"）--------
-app.get('/', async (_req, res) => {
+// 工具：同時註冊 /xxx 與 /api/xxx 兩種路徑
+function dualPaths(p) {
+  return [p, `/api${p}`];
+}
+
+// -------- 基本資訊（GET /api → 命中這裡的 "/"）--------
+app.get(dualPaths('/'), async (_req, res) => {
   try { await fetchVersion(); } catch {}
   res.status(200).json({
     name: 'gpt-ai-assistant',
@@ -45,9 +54,9 @@ app.get('/', async (_req, res) => {
   });
 });
 
-// 健康檢查 & 診斷（對外: /api/healthz, /api/_diag）
-app.get('/healthz', (_req, res) => res.status(200).send('ok'));
-app.get('/_diag', (_req, res) => {
+// 健康檢查 & 診斷
+app.get(dualPaths('/healthz'), (_req, res) => res.status(200).send('ok'));
+app.get(dualPaths('/_diag'), (_req, res) => {
   const faqPath = path.join(__dirname, '..', 'storage', 'faq.json');
   const exists = fs.existsSync(faqPath);
   const stat = exists ? fs.statSync(faqPath) : null;
@@ -57,24 +66,24 @@ app.get('/_diag', (_req, res) => {
   });
 });
 
-// LIFF relay 取設定（對外: /api/liff）
-app.get('/liff', (_req, res) => {
+// LIFF relay 取設定
+app.get(dualPaths('/liff'), (_req, res) => {
   res.status(200).json({ liffId: process.env.LIFF_ID || '' });
 });
 
-// FAQ reload（對外: /api/faq/reload）
-app.get('/faq/reload', (_req, res) => {
+// FAQ reload
+app.get(dualPaths('/faq/reload'), (_req, res) => {
   try { res.status(200).json({ reloaded: reloadFAQ() }); }
   catch (e) { res.status(500).json({ error: e?.message || String(e) }); }
 });
 
-// -------- GET /webhook 提供 LINE Verify（對外: /api/webhook）--------
-app.get(config.APP_WEBHOOK_PATH || '/webhook', (_req, res) => {
+// -------- GET /webhook 提供 LINE Verify --------
+app.get(dualPaths(config.APP_WEBHOOK_PATH || '/webhook'), (_req, res) => {
   res.status(200).send('ok');
 });
 
-// -------- 正式 Webhook（POST）（對外: /api/webhook）--------
-app.post(config.APP_WEBHOOK_PATH || '/webhook', validateLineSignature, async (req, res) => {
+// -------- 正式 Webhook（POST）--------
+app.post(dualPaths(config.APP_WEBHOOK_PATH || '/webhook'), validateLineSignature, async (req, res) => {
   if (!req.rawBody?.length) return res.sendStatus(200);
   let payload = {};
   try { payload = JSON.parse(req.rawBody.toString('utf-8')); }
@@ -127,8 +136,8 @@ function readMenuJson(filename) {
   return JSON.parse(raw);
 }
 
-// 檢查（對外: /api/admin/richmenus）
-app.get('/admin/richmenus', async (req, res) => {
+// 檢查
+app.get(dualPaths('/admin/richmenus'), async (req, res) => {
   if (!assertAdmin(req, res)) return;
   const client = lineClient();
   try {
@@ -140,8 +149,8 @@ app.get('/admin/richmenus', async (req, res) => {
   }
 });
 
-// 全刪（對外: /api/admin/richmenus）
-app.delete('/admin/richmenus', async (req, res) => {
+// 全刪
+app.delete(dualPaths('/admin/richmenus'), async (req, res) => {
   if (!assertAdmin(req, res)) return;
   const client = lineClient();
   const result = { defaultCleared: false, aliasesDeleted: [], menusDeleted: [] };
@@ -161,8 +170,8 @@ app.delete('/admin/richmenus', async (req, res) => {
   res.status(200).json(result);
 });
 
-// 重建（對外: /api/admin/richmenus）
-app.post('/admin/richmenus', async (req, res) => {
+// 重建
+app.post(dualPaths('/admin/richmenus'), async (req, res) => {
   if (!assertAdmin(req, res)) return;
   const client = lineClient();
   const MENUS = [
@@ -194,5 +203,5 @@ if (config.APP_PORT) {
   app.listen(config.APP_PORT, () => console.log(`[api] listening :${config.APP_PORT}`));
 }
 
-// ⚠️ 關鍵：Vercel 期望匯出 handler 函式
+// Vercel 期望匯出 handler
 export default (req, res) => app(req, res);
