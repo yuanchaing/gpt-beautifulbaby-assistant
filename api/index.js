@@ -35,39 +35,38 @@ app.use((req, res, next) => {
   next();
 });
 
-// -------- 基本資訊 --------
-app.get('/api', async (req, res) => {
+// -------- 基本資訊（注意：外部要打 /api，內部路徑不要帶 /api）--------
+app.get('/', async (req, res) => {
   try { await fetchVersion(); } catch {}
   res.status(200).json({ name: 'gpt-ai-assistant', version: getVersion(), env: process.env.VERCEL_ENV || 'local' });
 });
 
-// 健康檢查 & 診斷
-app.get('/api/healthz', (req, res) => res.status(200).send('ok'));
-app.get('/api/_diag', (req, res) => {
+// 健康檢查 & 診斷（對外：/api/healthz、/api/_diag）
+app.get('/healthz', (req, res) => res.status(200).send('ok'));
+app.get('/_diag', (req, res) => {
   const faqPath = path.join(__dirname, '..', 'storage', 'faq.json');
   const exists = fs.existsSync(faqPath);
   const stat = exists ? fs.statSync(faqPath) : null;
   res.status(200).json({ status: 'ok', faq: { exists, size: stat?.size || 0, mtime: stat?.mtime || null }});
 });
 
-// LIFF relay 取設定
-app.get('/api/liff', (req, res) => {
+// LIFF relay 取設定（對外：/api/liff）
+app.get('/liff', (req, res) => {
   res.status(200).json({ liffId: process.env.LIFF_ID || '' });
 });
 
-// FAQ reload
-app.get('/api/faq/reload', (req, res) => {
+// FAQ reload（對外：/api/faq/reload）
+app.get('/faq/reload', (req, res) => {
   try { res.status(200).json({ reloaded: reloadFAQ() }); }
   catch (e) { res.status(500).json({ error: e?.message || String(e) }); }
 });
 
-// -------- 關鍵：加入 GET /webhook 讓 LINE 後台 Verify=200 --------
+// -------- GET /webhook 提供 LINE Verify （對外：/api/webhook）--------
 app.get(config.APP_WEBHOOK_PATH || '/webhook', (req, res) => {
-  // 僅供 Verify 使用；不做事件處理
   res.status(200).send('ok');
 });
 
-// -------- 正式 Webhook（POST）--------
+// -------- 正式 Webhook（POST）（對外：/api/webhook）--------
 app.post(config.APP_WEBHOOK_PATH || '/webhook', validateLineSignature, async (req, res) => {
   if (!req.rawBody?.length) return res.sendStatus(200);
   let payload = {};
@@ -75,18 +74,15 @@ app.post(config.APP_WEBHOOK_PATH || '/webhook', validateLineSignature, async (re
   catch { return res.sendStatus(400); }
 
   const events = Array.isArray(payload.events) ? payload.events : [];
-
   const patchedPayload = {
     ...payload,
     events: events.map((ev) => {
       const text = ev?.message?.text || '';
       const isMedia = isMediaGenerationRequest({ text, event: ev });
-      if (isMedia) return ev; // 交由 app 層策略處理(拒絕媒體生成等)
+      if (isMedia) return ev;
       if (ev?.type === 'message' && ev?.message?.type === 'text') {
         const ans = matchFAQ(text, { minScore: 0.45 });
-        if (ans) {
-          return { ...ev, __faqHit: true, message: { ...ev.message, type: 'text', text: ans } };
-        }
+        if (ans) return { ...ev, __faqHit: true, message: { ...ev.message, type: 'text', text: ans } };
       }
       return ev;
     }),
@@ -124,8 +120,8 @@ function readMenuJson(filename) {
   return JSON.parse(raw);
 }
 
-// 檢查
-app.get('/api/admin/richmenus', async (req, res) => {
+// 檢查（對外：/api/admin/richmenus）
+app.get('/admin/richmenus', async (req, res) => {
   if (!assertAdmin(req, res)) return;
   const client = lineClient();
   try {
@@ -137,8 +133,8 @@ app.get('/api/admin/richmenus', async (req, res) => {
   }
 });
 
-// 全刪
-app.delete('/api/admin/richmenus', async (req, res) => {
+// 全刪（對外：/api/admin/richmenus）
+app.delete('/admin/richmenus', async (req, res) => {
   if (!assertAdmin(req, res)) return;
   const client = lineClient();
   const result = { defaultCleared: false, aliasesDeleted: [], menusDeleted: [] };
@@ -158,8 +154,8 @@ app.delete('/api/admin/richmenus', async (req, res) => {
   res.status(200).json(result);
 });
 
-// 重建
-app.post('/api/admin/richmenus', async (req, res) => {
+// 重建（對外：/api/admin/richmenus）
+app.post('/admin/richmenus', async (req, res) => {
   if (!assertAdmin(req, res)) return;
   const client = lineClient();
   const MENUS = [
@@ -186,7 +182,6 @@ app.post('/api/admin/richmenus', async (req, res) => {
   }
 });
 
-// local run
 if (config.APP_PORT) {
   app.listen(config.APP_PORT, () => console.log(`[api] listening :${config.APP_PORT}`));
 }
