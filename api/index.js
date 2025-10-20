@@ -35,38 +35,45 @@ app.use((req, res, next) => {
   next();
 });
 
-// -------- 基本資訊（注意：外部要打 /api，內部路徑不要帶 /api）--------
-app.get('/', async (req, res) => {
+// -------- 基本資訊（對外: GET /api → 會到這裡的 "/"）--------
+app.get('/', async (_req, res) => {
   try { await fetchVersion(); } catch {}
-  res.status(200).json({ name: 'gpt-ai-assistant', version: getVersion(), env: process.env.VERCEL_ENV || 'local' });
+  res.status(200).json({
+    name: 'gpt-ai-assistant',
+    version: getVersion(),
+    env: process.env.VERCEL_ENV || 'local'
+  });
 });
 
-// 健康檢查 & 診斷（對外：/api/healthz、/api/_diag）
-app.get('/healthz', (req, res) => res.status(200).send('ok'));
-app.get('/_diag', (req, res) => {
+// 健康檢查 & 診斷（對外: /api/healthz, /api/_diag）
+app.get('/healthz', (_req, res) => res.status(200).send('ok'));
+app.get('/_diag', (_req, res) => {
   const faqPath = path.join(__dirname, '..', 'storage', 'faq.json');
   const exists = fs.existsSync(faqPath);
   const stat = exists ? fs.statSync(faqPath) : null;
-  res.status(200).json({ status: 'ok', faq: { exists, size: stat?.size || 0, mtime: stat?.mtime || null }});
+  res.status(200).json({
+    status: 'ok',
+    faq: { exists, size: stat?.size || 0, mtime: stat?.mtime || null }
+  });
 });
 
-// LIFF relay 取設定（對外：/api/liff）
-app.get('/liff', (req, res) => {
+// LIFF relay 取設定（對外: /api/liff）
+app.get('/liff', (_req, res) => {
   res.status(200).json({ liffId: process.env.LIFF_ID || '' });
 });
 
-// FAQ reload（對外：/api/faq/reload）
-app.get('/faq/reload', (req, res) => {
+// FAQ reload（對外: /api/faq/reload）
+app.get('/faq/reload', (_req, res) => {
   try { res.status(200).json({ reloaded: reloadFAQ() }); }
   catch (e) { res.status(500).json({ error: e?.message || String(e) }); }
 });
 
-// -------- GET /webhook 提供 LINE Verify （對外：/api/webhook）--------
-app.get(config.APP_WEBHOOK_PATH || '/webhook', (req, res) => {
+// -------- GET /webhook 提供 LINE Verify（對外: /api/webhook）--------
+app.get(config.APP_WEBHOOK_PATH || '/webhook', (_req, res) => {
   res.status(200).send('ok');
 });
 
-// -------- 正式 Webhook（POST）（對外：/api/webhook）--------
+// -------- 正式 Webhook（POST）（對外: /api/webhook）--------
 app.post(config.APP_WEBHOOK_PATH || '/webhook', validateLineSignature, async (req, res) => {
   if (!req.rawBody?.length) return res.sendStatus(200);
   let payload = {};
@@ -120,7 +127,7 @@ function readMenuJson(filename) {
   return JSON.parse(raw);
 }
 
-// 檢查（對外：/api/admin/richmenus）
+// 檢查（對外: /api/admin/richmenus）
 app.get('/admin/richmenus', async (req, res) => {
   if (!assertAdmin(req, res)) return;
   const client = lineClient();
@@ -133,7 +140,7 @@ app.get('/admin/richmenus', async (req, res) => {
   }
 });
 
-// 全刪（對外：/api/admin/richmenus）
+// 全刪（對外: /api/admin/richmenus）
 app.delete('/admin/richmenus', async (req, res) => {
   if (!assertAdmin(req, res)) return;
   const client = lineClient();
@@ -154,7 +161,7 @@ app.delete('/admin/richmenus', async (req, res) => {
   res.status(200).json(result);
 });
 
-// 重建（對外：/api/admin/richmenus）
+// 重建（對外: /api/admin/richmenus）
 app.post('/admin/richmenus', async (req, res) => {
   if (!assertAdmin(req, res)) return;
   const client = lineClient();
@@ -182,7 +189,10 @@ app.post('/admin/richmenus', async (req, res) => {
   }
 });
 
+// 本地啟動（serverless 不會走）
 if (config.APP_PORT) {
   app.listen(config.APP_PORT, () => console.log(`[api] listening :${config.APP_PORT}`));
 }
-export default app;
+
+// ⚠️ 關鍵：Vercel 期望匯出 handler 函式
+export default (req, res) => app(req, res);
