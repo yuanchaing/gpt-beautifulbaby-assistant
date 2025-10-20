@@ -1,0 +1,47 @@
+{
+  "size": { "width": 2500, "height": 1686 },
+  "selected": false,
+  "name": "AR子選單",
+  "chatBarText": "AR 闖關",
+  "areas": [
+    {
+      "bounds": { "x": 0, "y": 0, "width": 833, "height": 843 },
+      "action": {
+        "type": "uri",
+        "uri": "https://liff.line.me/LIFF_ID_REPLACE?to=https%3A%2F%2Fgoldenslash1.8thwall.app%2Ffood-travel-lemonchocolatecake%2F%3FopenExternalBrowser%3D1&venuesid=v001&openExternalBrowser=1"
+      }
+    },
+    {
+      "bounds": { "x": 833, "y": 0, "width": 834, "height": 843 },
+      "action": {
+        "type": "uri",
+        "uri": "https://liff.line.me/LIFF_ID_REPLACE?to=https%3A%2F%2Fgoldenslash1.8thwall.app%2Ffood-travel-bostoncreampie%3FopenExternalBrowser%3D1&venuesid=v002&openExternalBrowser=1"
+      }
+    },
+    {
+      "bounds": { "x": 1667, "y": 0, "width": 833, "height": 843 },
+      "action": {
+        "type": "uri",
+        "uri": "https://liff.line.me/LIFF_ID_REPLACE?to=https%3A%2F%2Fgoldenslash1.8thwall.app%2Ffood-travel-taroswissroll%3FopenExternalBrowser%3D1&venuesid=v003&openExternalBrowser=1"
+      }
+    },
+    {
+      "bounds": { "x": 0, "y": 843, "width": 833, "height": 843 },
+      "action": {
+        "type": "uri",
+        "uri": "https://liff.line.me/LIFF_ID_REPLACE?to=https%3A%2F%2Fgoldenslash1.8thwall.app%2Ffood-travel-newyorkcheesecake%3FopenExternalBrowser%3D1&venuesid=v004&openExternalBrowser=1"
+      }
+    },
+    {
+      "bounds": { "x": 833, "y": 843, "width": 834, "height": 843 },
+      "action": {
+        "type": "uri",
+        "uri": "https://liff.line.me/LIFF_ID_REPLACE?to=https%3A%2F%2Fgoldenslash1.8thwall.app%2Ffood-travel-dorayaki%3FopenExternalBrowser%3D1&venuesid=v005&openExternalBrowser=1"
+      }
+    },
+    {
+      "bounds": { "x": 1667, "y": 843, "width": 833, "height": 843 },
+      "action": { "type": "richmenuswitch", "richMenuAliasId": "main-menu", "data": "back-main" }
+    }
+  ]
+}

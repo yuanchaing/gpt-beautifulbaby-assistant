@@ -1,0 +1,50 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>LIFF Relay</title>
+  <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+  <style>body{font-family:system-ui,Arial;padding:16px}</style>
+</head>
+<body>
+  <div id="log">Loading...</div>
+  <script>
+    (async () => {
+      const log = (t)=>document.getElementById('log').textContent=t;
+      try {
+        const r = await fetch('/api/liff');
+        if (!r.ok) throw new Error('LIFF config not found');
+        const { liffId } = await r.json();
+        if (!liffId) throw new Error('liffId missing');
+
+        await liff.init({ liffId });
+        if (!liff.isLoggedIn()) liff.login();
+
+        const params = new URLSearchParams(location.search);
+        const to = params.get('to');            // 需為 encodeURIComponent 的 URL
+        const venuesid = params.get('venuesid');
+        const openExternalBrowser = params.get('openExternalBrowser');
+
+        if (!to) return log('Missing "to" parameter');
+
+        const prof = await liff.getProfile();
+        const userId = prof?.userId || '';
+
+        const url = new URL(decodeURIComponent(to));
+        if (userId) url.searchParams.set('userId', userId);
+        if (venuesid) url.searchParams.set('venuesid', venuesid);
+
+        const finalUrl = url.toString();
+        if (openExternalBrowser === '1' && liff.openWindow) {
+          liff.openWindow({ url: finalUrl, external: true });
+        } else {
+          location.href = finalUrl;
+        }
+      } catch (e) {
+        log('Error: ' + (e.message || e));
+      }
+    })();
+  </script>
+</body>
+</html>
