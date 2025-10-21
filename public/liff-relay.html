@@ -1,192 +1,53 @@
-<!DOCTYPE html>
-<html lang="zh-Hant">
+<!doctype html>
+<html>
 <head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>LIFF Relay</title>
-<style>
-  body { font-family: system-ui, sans-serif; padding: 20px; text-align: center; }
-  #msg { color: #444; white-space: pre-wrap; text-align: left; display: inline-block; }
-</style>
+  <meta charset="utf-8">
+  <title>LIFF Relay</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- 千萬不要加 <base href="/liff-relay.html/">，會造成路徑重複 -->
+  <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
 </head>
 <body>
-<div id="msg">載入中…</div>
 <script>
 (async () => {
-  const out = (t) => (document.getElementById('msg').textContent = t);
+  // 解析查詢參數
+  const params = new URLSearchParams(location.search);
+  const to = params.get('to');
+  const openExternal = params.get('openExternalBrowser') === '1';
 
-  // --- helpers ---
-  const parseQS = (qs) => new URLSearchParams(qs.startsWith('?') ? qs.slice(1) : qs);
-  const parseURLLikeParams = (s) => {
-    try {
-      let raw = s;
-      try { raw = decodeURIComponent(s); } catch {}
-      // 如果是以 / 開頭，補上 origin；如果沒有 /，也一律補 /
-      let urlLike = raw;
-      if (!/^https?:\/\//i.test(raw)) {
-        urlLike = location.origin + (raw.startsWith('/') ? raw : '/' + raw);
-      }
-      return new URL(urlLike).searchParams;
-    } catch { return new URLSearchParams(''); }
-  };
-  const toAbsolute = (url) => {
-    try {
-      // 給相對路徑補上 origin，避免 /liff-relay.html/liff-relay.html 這種情況
-      const raw = decodeURIComponent(url);
-      if (/^https?:\/\//i.test(raw)) return raw;
-      return location.origin + (raw.startsWith('/') ? raw : '/' + raw);
-    } catch {
-      return url;
+  if (!to) {
+    document.body.textContent = 'Missing "to" parameter';
+    return;
+  }
+
+  //（可選）白名單保護，避免開到奇怪網域
+  const ALLOW = ['arcompletions.onrender.com'];
+  try {
+    const u = new URL(to);
+    if (!ALLOW.includes(u.hostname)) {
+      document.body.textContent = 'Target domain not allowed';
+      return;
     }
-  };
-  const extractFromParams = (params) => {
-    let to = params.get('to');
-    let venuesid = params.get('venuesid');
-    let oeb = params.get('openExternalBrowser');
-
-    // 若沒 to，從 liff.state 或 state 內層再找
-    if (!to) {
-      const inner = params.get('liff.state') || params.get('state');
-      if (inner) {
-        const ip = parseURLLikeParams(inner);
-        to = ip.get('to') || to;
-        venuesid = venuesid || ip.get('venuesid');
-        oeb = oeb || ip.get('openExternalBrowser');
-      }
-    }
-    return { to, venuesid, oeb };
-  };
-
-  // --- 0) 先從可見的網址拿一次 ---
-  const locQS = parseQS(location.search);
-  let { to, venuesid, oeb } = extractFromParams(locQS);
-
-  // hash 備援
-  if (!to) {
-    const hashQS = parseQS((location.hash || '').replace(/^#/, ''));
-    const h = extractFromParams(hashQS);
-    to = h.to || to;
-    venuesid = venuesid || h.venuesid;
-    oeb = oeb || h.oeb;
-  }
-
-  // 沒拿到也先記錄
-  if (!to) out('尋找目標網址中…（尚未在初始網址內找到 to，將於 LIFF 初始化後再嘗試）');
-  else sessionStorage.setItem('relay_to', to);
-
-  // --- 1) 取得 LIFF ID ---
-  let liffId = '';
-  try {
-    const j = await fetch('/api/liff').then(r => r.json()).catch(() => ({}));
-    liffId = j?.liffId || '';
-  } catch {}
-  if (!liffId) { out('LIFF 未設定（/api/liff 無回傳 liffId）'); return; }
-
-  // --- 2) 載入 LIFF SDK ---
-  await new Promise((resolve, reject) => {
-    const s = document.createElement('script');
-    s.src = 'https://static.line-scdn.net/liff/edge/2/sdk.js';
-    s.onload = resolve; s.onerror = reject; document.head.appendChild(s);
-  });
-
-  // --- 3) 初始化 & 登入 ---
-  try { await liff.init({ liffId }); }
-  catch (e) { out('LIFF 初始化失敗：' + (e?.message || e)); return; }
-
-  if (!liff.isLoggedIn()) {
-    out('登入中…');
-    liff.login({ redirectUri: location.href });
+  } catch (e) {
+    document.body.textContent = 'Invalid "to" URL';
     return;
   }
 
-  // --- 4) 若一開始沒拿到，從 LIFF context 再撈一次 ---
-  if (!to) {
-    try {
-      const ctx = liff.getContext?.();
-      const qsStr = ctx?.queryString || ''; // 可能是 "liff.state=%2Fliff-relay.html%3Fto%3D..."
-      const ctxQS = parseQS(qsStr);
-      const fromCtx = extractFromParams(ctxQS);
-      if (fromCtx.to) {
-        to = fromCtx.to;
-        venuesid = venuesid || fromCtx.venuesid;
-        oeb = oeb || fromCtx.oeb;
-      }
-    } catch {}
-  }
-
-  // --- 5) 最後備援：sessionStorage ---
-  if (!to) to = sessionStorage.getItem('relay_to');
-
-  if (!to) {
-    let ctxQSStr = '';
-    try { ctxQSStr = (liff.getContext?.().queryString || '(無)'); } catch {}
-    out([
-      '[錯誤] 缺少 to 參數',
-      'location.search = ' + location.search,
-      'location.hash   = ' + location.hash,
-      'session.relay_to= ' + (sessionStorage.getItem('relay_to') || '(無)'),
-      'liff context qs = ' + ctxQSStr
-    ].join('\n'));
+  // 初始化 LIFF
+  try {
+    await liff.init({ liffId: '2008287433-pJxD7oz9' });
+  } catch (e) {
+    // 即使 LIFF init 失敗，也保底用 replace 導出
+    location.replace(to);
     return;
   }
 
-  // --- 6) un-nest：如果 to 又是 liff-relay.html，就一層層解開直到不是 ---
-  const isRelayPath = (u) => {
-    try {
-      const raw = decodeURIComponent(u);
-      return /(^|\/)liff-relay\.html(\?|$)/i.test(raw);
-    } catch { return false; }
-  };
-  let safety = 0;
-  while (isRelayPath(to) && safety++ < 5) {
-    const ip = parseURLLikeParams(to);
-    const innerTo = ip.get('to');
-    if (!innerTo) break;
-    to = innerTo;
-    // 內層若有 venuesid / oeb 也保留
-    venuesid = venuesid || ip.get('venuesid');
-    oeb = oeb || ip.get('openExternalBrowser');
-  }
-
-  sessionStorage.setItem('relay_to', to);
-
-  // --- 7) 取得 userId（可選）---
-  let userId = '';
-  try {
-    const profile = await liff.getProfile();
-    userId = profile?.userId || '';
-  } catch {}
-
-  // --- 8) 組合最終目標，強制絕對網址 ---
-  let target;
-  try {
-    const abs = toAbsolute(to);
-    target = new URL(abs);
-  } catch {
-    out('[錯誤] to 不是合法網址：' + String(to));
-    return;
-  }
-
-  const tQS = target.searchParams;
-  if (userId) tQS.set('userId', userId);
-  if (venuesid) tQS.set('venuesid', venuesid);
-  const finalUrl = target.toString();
-
-  // --- 9) 是否外部開啟（外層優先，內層備援）---
-  if (!oeb) {
-    oeb = locQS.get('openExternalBrowser') ||
-         (locQS.get('liff.state') && parseURLLikeParams(locQS.get('liff.state')).get('openExternalBrowser')) ||
-         null;
-  }
-
-  // --- 10) 跳轉 ---
-  if (oeb === '1' && liff.isInClient()) {
-    out('即將於外部瀏覽器開啟…');
-    liff.openWindow({ url: finalUrl, external: true });
+  // 依需求是否外部開啟
+  if (openExternal) {
+    liff.openWindow({ url: to, external: true });
   } else {
-    out('跳轉中…');
-    // 使用絕對網址，避免相對路徑被接到 /liff-relay.html 之後
-    location.replace(finalUrl);
+    // 站內跳轉
+    location.replace(to);
   }
 })();
 </script>
