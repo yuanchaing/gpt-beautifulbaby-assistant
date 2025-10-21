@@ -1,53 +1,213 @@
-<!doctype html>
-<html>
+<!DOCTYPE html>
+<html lang="zh-Hant">
 <head>
-  <meta charset="utf-8">
-  <title>LIFF Relay</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <!-- 千萬不要加 <base href="/liff-relay.html/">，會造成路徑重複 -->
-  <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>LIFF Relay</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin:0; padding:20px; }
+  #msg { white-space: pre-wrap; color:#333; }
+  .actions { position: fixed; right: 12px; bottom: 12px; display: flex; gap: 8px; }
+  .btn { padding:10px 12px; border-radius:10px; border:1px solid #ddd; background:#fff; box-shadow:0 2px 8px rgba(0,0,0,.08); }
+</style>
 </head>
 <body>
+<div id="msg">載入中…</div>
+<div class="actions" style="display:none" id="actions">
+  <button class="btn" id="copyBtn">複製除錯資訊</button>
+  <button class="btn" id="sendBtn">回報除錯資訊</button>
+</div>
 <script>
 (async () => {
-  // 解析查詢參數
-  const params = new URLSearchParams(location.search);
-  const to = params.get('to');
-  const openExternal = params.get('openExternalBrowser') === '1';
+  const $msg = document.getElementById('msg');
+  const $actions = document.getElementById('actions');
+  const $copy = document.getElementById('copyBtn');
+  const $send = document.getElementById('sendBtn');
+
+  const out = (t, showActions=false) => {
+    $msg.textContent = t;
+    $actions.style.display = showActions ? 'flex' : 'none';
+  };
+
+  const parseQS = (qs) => new URLSearchParams(qs.startsWith('?') ? qs.slice(1) : qs);
+  const parseURLLikeParams = (s) => {
+    try {
+      let raw = s;
+      try { raw = decodeURIComponent(s); } catch {}
+      const base = raw.startsWith('http') ? raw : (location.origin + (raw.startsWith('/') ? raw : '/' + raw));
+      return new URL(base).searchParams;
+    } catch { return new URLSearchParams(''); }
+  };
+  const toAbsolute = (url) => {
+    try {
+      const raw = decodeURIComponent(url);
+      if (/^https?:\/\//i.test(raw)) return raw;
+      return location.origin + (raw.startsWith('/') ? raw : '/' + raw);
+    } catch { return url; }
+  };
+  const extractFromParams = (params) => {
+    let to = params.get('to');
+    let venuesid = params.get('venuesid');
+    let oeb = params.get('openExternalBrowser');
+
+    const inner = params.get('liff.state') || params.get('state');
+    if (!to && inner) {
+      const ip = parseURLLikeParams(inner);
+      to = ip.get('to') || to;
+      venuesid = venuesid || ip.get('venuesid');
+      oeb = oeb || ip.get('openExternalBrowser');
+    }
+    return { to, venuesid, oeb };
+  };
+
+  const locQS = parseQS(location.search);
+  let { to, venuesid, oeb } = extractFromParams(locQS);
 
   if (!to) {
-    document.body.textContent = 'Missing "to" parameter';
-    return;
+    const hashQS = parseQS((location.hash || '').replace(/^#/, ''));
+    const fromHash = extractFromParams(hashQS);
+    to = fromHash.to || to;
+    venuesid = venuesid || fromHash.venuesid;
+    oeb = oeb || fromHash.oeb;
   }
 
-  //（可選）白名單保護，避免開到奇怪網域
-  const ALLOW = ['arcompletions.onrender.com'];
+  if (to) sessionStorage.setItem('relay_to', to);
+  if (!to) out('尋找目標網址中…（尚未在初始網址內找到 to，將於 LIFF 初始化後再嘗試）');
+
+  // 取得 LIFF ID
+  let liffId = '';
   try {
-    const u = new URL(to);
-    if (!ALLOW.includes(u.hostname)) {
-      document.body.textContent = 'Target domain not allowed';
-      return;
-    }
-  } catch (e) {
-    document.body.textContent = 'Invalid "to" URL';
+    const j = await fetch('/api/liff').then(r => r.json()).catch(() => ({}));
+    liffId = j?.liffId || '';
+  } catch {}
+  if (!liffId) { return showError('LIFF 未設定（/api/liff 無回傳 liffId）'); }
+
+  // 載入 SDK
+  await new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = 'https://static.line-scdn.net/liff/edge/2/sdk.js';
+    s.onload = resolve; s.onerror = reject; document.head.appendChild(s);
+  });
+
+  try { await liff.init({ liffId }); }
+  catch (e) { return showError('LIFF 初始化失敗：' + (e?.message || e)); }
+
+  if (!liff.isLoggedIn()) {
+    out('登入中…');
+    liff.login({ redirectUri: location.href });
     return;
   }
 
-  // 初始化 LIFF
+  // 補救：從 LIFF context 撈一次
+  if (!to) {
+    try {
+      const ctx = liff.getContext?.();
+      const qsStr = ctx?.queryString || '';
+      const ctxQS = parseQS(qsStr);
+      const fromCtx = extractFromParams(ctxQS);
+      if (fromCtx.to) {
+        to = fromCtx.to;
+        venuesid = venuesid || fromCtx.venuesid;
+        oeb = oeb || fromCtx.oeb;
+      }
+    } catch {}
+  }
+
+  if (!to) to = sessionStorage.getItem('relay_to');
+
+  if (!to) {
+    // 蒐集偵錯資訊並顯示+支援上報/複製
+    return showError('[錯誤] 缺少 to 參數\n' + await buildDebug());
+  }
+
+  // 如果 to 又是 relay，自動拆一層
+  const isRelay = (u) => {
+    try { return /(^|\/)liff-relay\.html(\?|$)/i.test(decodeURIComponent(u)); }
+    catch { return false; }
+  };
+  let safe = 0;
+  while (isRelay(to) && safe++ < 5) {
+    const ip = parseURLLikeParams(to);
+    const innerTo = ip.get('to');
+    if (!innerTo) break;
+    to = innerTo;
+    venuesid = venuesid || ip.get('venuesid');
+    oeb = oeb || ip.get('openExternalBrowser');
+  }
+
+  // 取得 userId
+  let userId = '';
   try {
-    await liff.init({ liffId: '2008287433-pJxD7oz9' });
-  } catch (e) {
-    // 即使 LIFF init 失敗，也保底用 replace 導出
-    location.replace(to);
-    return;
-  }
+    const profile = await liff.getProfile();
+    userId = profile?.userId || '';
+  } catch {}
 
-  // 依需求是否外部開啟
-  if (openExternal) {
-    liff.openWindow({ url: to, external: true });
+  // 組合最終 URL
+  let target;
+  try {
+    target = new URL(toAbsolute(to));
+  } catch {
+    return showError('[錯誤] to 不是合法網址：' + String(to) + '\n' + await buildDebug());
+  }
+  const tQS = target.searchParams;
+  if (userId) tQS.set('userId', userId);
+  if (venuesid) tQS.set('venuesid', venuesid);
+
+  const finalUrl = target.toString();
+
+  const outerOeb =
+    oeb ||
+    locQS.get('openExternalBrowser') ||
+    (locQS.get('liff.state') && parseURLLikeParams(locQS.get('liff.state')).get('openExternalBrowser')) ||
+    null;
+
+  if (outerOeb === '1' && liff.isInClient()) {
+    out('即將於外部瀏覽器開啟…');
+    liff.openWindow({ url: finalUrl, external: true });
   } else {
-    // 站內跳轉
-    location.replace(to);
+    out('跳轉中…');
+    location.replace(finalUrl);
+  }
+
+  // =============== 工具區：錯誤顯示、回報、複製 ===============
+  async function buildDebug() {
+    let ctxQS = '';
+    try { ctxQS = (liff.getContext?.().queryString || '(無)'); } catch {}
+    const obj = {
+      href: location.href,
+      search: location.search,
+      hash: location.hash,
+      session_relay_to: sessionStorage.getItem('relay_to') || '(無)',
+      liff_context_queryString: ctxQS,
+      userAgent: navigator.userAgent,
+      time: new Date().toISOString()
+    };
+    return JSON.stringify(obj, null, 2);
+  }
+
+  function showError(text) {
+    out(text, true);
+    // 綁定按鈕
+    $copy.onclick = async () => {
+      const payload = await buildDebug();
+      await navigator.clipboard.writeText(payload).catch(() => {});
+      alert('已複製除錯資訊，回到聊天室貼給我即可。');
+    };
+    $send.onclick = async () => {
+      const payload = await buildDebug();
+      try {
+        const r = await fetch('/api/liff-debug', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: payload
+        });
+        const j = await r.json().catch(() => ({}));
+        alert('已回報除錯資訊，ID：' + (j?.id || '(未知)') + '\n請把這個 ID 告訴我。');
+      } catch (e) {
+        alert('回報失敗：' + (e?.message || e));
+      }
+    };
+    return;
   }
 })();
 </script>
