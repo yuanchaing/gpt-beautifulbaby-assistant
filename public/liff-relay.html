@@ -1,50 +1,102 @@
-<!doctype html>
-<html>
+<!DOCTYPE html>
+<html lang="zh-Hant">
 <head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>LIFF Relay</title>
-  <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
-  <style>body{font-family:system-ui,Arial;padding:16px}</style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LIFF Relay</title>
+<style>
+  body { font-family: system-ui, sans-serif; padding: 20px; text-align: center; }
+  #msg { color: #444; }
+</style>
 </head>
 <body>
-  <div id="log">Loading...</div>
-  <script>
-    (async () => {
-      const log = (t)=>document.getElementById('log').textContent=t;
-      try {
-        const r = await fetch('/api/liff');
-        if (!r.ok) throw new Error('LIFF config not found');
-        const { liffId } = await r.json();
-        if (!liffId) throw new Error('liffId missing');
+<div id="msg">載入中…</div>
+<script>
+(async () => {
+  const el = document.getElementById('msg');
 
-        await liff.init({ liffId });
-        if (!liff.isLoggedIn()) liff.login();
+  // ✅ 1. 嘗試從 URL query 或 sessionStorage 取回原始 to 參數
+  const currentParams = new URLSearchParams(location.search);
+  let to = currentParams.get('to') || sessionStorage.getItem('relay_to');
 
-        const params = new URLSearchParams(location.search);
-        const to = params.get('to');            // 需為 encodeURIComponent 的 URL
-        const venuesid = params.get('venuesid');
-        const openExternalBrowser = params.get('openExternalBrowser');
+  // LINE LIFF 重新導回時會帶 liffClientId/code 等參數，會遺失 to
+  if (!to && document.referrer.includes('liff.line.me')) {
+    to = sessionStorage.getItem('relay_to');
+  }
 
-        if (!to) return log('Missing "to" parameter');
+  // 沒有 to，直接提示
+  if (!to) {
+    el.textContent = '缺少 to 參數';
+    return;
+  }
+  sessionStorage.setItem('relay_to', to);
 
-        const prof = await liff.getProfile();
-        const userId = prof?.userId || '';
+  // ✅ 2. 取得 liffId
+  let liffId = '';
+  try {
+    const r = await fetch('/api/liff');
+    const j = await r.json();
+    liffId = j.liffId || '';
+  } catch (e) {}
+  if (!liffId) {
+    el.textContent = 'LIFF ID 無法取得，請確認 /api/liff 設定';
+    return;
+  }
 
-        const url = new URL(decodeURIComponent(to));
-        if (userId) url.searchParams.set('userId', userId);
-        if (venuesid) url.searchParams.set('venuesid', venuesid);
+  // ✅ 3. 載入 LIFF SDK
+  await new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = 'https://static.line-scdn.net/liff/edge/2/sdk.js';
+    s.onload = resolve;
+    s.onerror = reject;
+    document.head.appendChild(s);
+  });
 
-        const finalUrl = url.toString();
-        if (openExternalBrowser === '1' && liff.openWindow) {
-          liff.openWindow({ url: finalUrl, external: true });
-        } else {
-          location.href = finalUrl;
-        }
-      } catch (e) {
-        log('Error: ' + (e.message || e));
-      }
-    })();
-  </script>
+  // ✅ 4. 初始化 LIFF
+  try {
+    await liff.init({ liffId });
+  } catch (e) {
+    el.textContent = 'LIFF 初始化失敗：' + (e?.message || e);
+    return;
+  }
+
+  // ✅ 5. 未登入就要求登入（redirect 回來會保留 sessionStorage）
+  if (!liff.isLoggedIn()) {
+    el.textContent = '登入中…';
+    liff.login({ redirectUri: location.href });
+    return;
+  }
+
+  // ✅ 6. 取得使用者 ID
+  let userId = '';
+  try {
+    const profile = await liff.getProfile();
+    userId = profile.userId || '';
+  } catch (e) {
+    console.warn('取 userId 失敗', e);
+  }
+
+  // ✅ 7. 組合最終網址
+  const target = new URL(decodeURIComponent(to));
+  const q = target.searchParams;
+  if (userId) q.set('userId', userId);
+
+  // 保留 venuesid（若存在於原 query）
+  const venuesid = currentParams.get('venuesid');
+  if (venuesid) q.set('venuesid', venuesid);
+
+  const finalUrl = target.toString();
+
+  // ✅ 8. 判斷是否開外部瀏覽器
+  const oeb = currentParams.get('openExternalBrowser');
+  if (oeb === '1' && liff.isInClient()) {
+    el.textContent = '開啟外部瀏覽器中…';
+    liff.openWindow({ url: finalUrl, external: true });
+  } else {
+    el.textContent = '跳轉中…';
+    location.replace(finalUrl);
+  }
+})();
+</script>
 </body>
 </html>
