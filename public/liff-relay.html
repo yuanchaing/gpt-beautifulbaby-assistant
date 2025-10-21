@@ -6,131 +6,146 @@
 <title>LIFF Relay</title>
 <style>
   body { font-family: system-ui, sans-serif; padding: 20px; text-align: center; }
-  #msg { color: #444; white-space: pre-wrap; }
+  #msg { color: #444; white-space: pre-wrap; text-align:left; display:inline-block; }
 </style>
 </head>
 <body>
 <div id="msg">載入中…</div>
 <script>
 (async () => {
-  const el = document.getElementById('msg');
+  const out = (t) => (document.getElementById('msg').textContent = t);
 
-  // 小工具
-  const parseParams = (s) => {
+  // 解析一段查詢字串 (可以是 "?a=1" 或 "a=1")
+  const parseQS = (qs) => new URLSearchParams(qs.startsWith('?') ? qs.slice(1) : qs);
+
+  // 從一段 URL-like（例如 "/liff-relay.html?to=..."）抽出 query params
+  const parseURLLikeParams = (s) => {
     try {
-      // s 可能是 "/liff-relay.html?to=..." 或完整 URL 或已編碼字串
       let raw = s;
       try { raw = decodeURIComponent(s); } catch {}
       const u = new URL(raw.startsWith('http') ? raw : (location.origin + (raw.startsWith('/') ? raw : '/' + raw)));
       return u.searchParams;
-    } catch {
-      return new URLSearchParams('');
-    }
+    } catch { return new URLSearchParams(''); }
   };
-  const getQS = () => new URLSearchParams(location.search);
-  const getHashQS = () => new URLSearchParams((location.hash || '').replace(/^#/, ''));
 
-  // 1) 盡早嘗試還原 to（以免中途 login 跳轉丟失）
-  const qsNow = getQS();
-  const hashQS = getHashQS();
+  // 從多來源抽取 to / venuesid / openExternalBrowser
+  const extractFromParams = (params) => {
+    let to = params.get('to');
+    let venuesid = params.get('venuesid');
+    let oeb = params.get('openExternalBrowser');
 
-  let to =
-    qsNow.get('to') ||                                   // 直接 ?to=
-    (qsNow.get('liff.state') && parseParams(qsNow.get('liff.state')).get('to')) || // ?liff.state=...to=...
-    (qsNow.get('state') && parseParams(qsNow.get('state')).get('to')) ||           // ?state=...to=...
-    hashQS.get('to') ||                                   // #to=...
-    sessionStorage.getItem('relay_to') ||                 // 上次留下的
-    null;
+    // 若沒 to，嘗試從 liff.state / state 內層解析
+    if (!to) {
+      const ls = params.get('liff.state') || params.get('state');
+      if (ls) {
+        const inner = parseURLLikeParams(ls);
+        to = inner.get('to') || to;
+        venuesid = venuesid || inner.get('venuesid');
+        oeb = oeb || inner.get('openExternalBrowser');
+      }
+    }
+    return { to, venuesid, oeb };
+  };
 
-  if (to) sessionStorage.setItem('relay_to', to);
+  // 先讀目前網址 (初步，可能抓不到)
+  const locQS = parseQS(location.search);
+  let { to, venuesid, oeb } = extractFromParams(locQS);
+  const hashQS = parseQS((location.hash || '').replace(/^#/, ''));
+  if (!to) {
+    const fromHash = extractFromParams(hashQS);
+    to = fromHash.to || to;
+    venuesid = venuesid || fromHash.venuesid;
+    oeb = oeb || fromHash.oeb;
+  }
+  if (!to) {
+    // 先記錄等待 liff.init() 後用 context 再補
+    out('尋找目標網址中…（to 參數尚未在初始網址內，將於 LIFF 初始化後再嘗試）');
+  } else {
+    sessionStorage.setItem('relay_to', to);
+  }
 
-  // 2) 沒有 to 就先顯示提示，但先別退出；等 init 後再從 liff context 補救一次
-  if (!to) el.textContent = '尋找目標網址中…（to 參數未在初始網址內）';
-
-  // 3) 取得 LIFF ID
+  // 取得 LIFF ID
   let liffId = '';
   try {
-    const j = await fetch('/api/liff').then(r => r.json()).catch(() => ({}));
-    liffId = j?.liffId || '';
+    const r = await fetch('/api/liff').then(r => r.json()).catch(() => ({}));
+    liffId = r?.liffId || '';
   } catch {}
-  if (!liffId) { el.textContent = 'LIFF 未設定（/api/liff 無回傳 liffId）'; return; }
+  if (!liffId) { out('LIFF 未設定（/api/liff 無回傳 liffId）'); return; }
 
-  // 4) 載入 LIFF SDK
+  // 載入 LIFF SDK
   await new Promise((resolve, reject) => {
     const s = document.createElement('script');
     s.src = 'https://static.line-scdn.net/liff/edge/2/sdk.js';
-    s.onload = resolve;
-    s.onerror = reject;
-    document.head.appendChild(s);
+    s.onload = resolve; s.onerror = reject; document.head.appendChild(s);
   });
 
-  // 5) 初始化 LIFF
+  // 初始化 LIFF
   try { await liff.init({ liffId }); }
-  catch (e) { el.textContent = 'LIFF 初始化失敗：' + (e?.message || e); return; }
+  catch (e) { out('LIFF 初始化失敗：' + (e?.message || e)); return; }
 
-  // 6) 未登入就先登入（redirect 回本頁）
+  // 必要時登入
   if (!liff.isLoggedIn()) {
-    el.textContent = '登入中…';
+    out('登入中…');
     liff.login({ redirectUri: location.href });
     return;
   }
 
-  // 7) 若一開始沒有 to，嘗試從 LIFF Context 補救
-  if (!to) {
-    try {
-      const ctx = liff.getContext?.();
-      const qsStr = ctx?.queryString || ''; // e.g. "liff.state=%2Fliff-relay.html%3Fto%3D..."
-      const ctxQS = new URLSearchParams(qsStr);
-      to =
-        ctxQS.get('to') ||
-        (ctxQS.get('liff.state') && parseParams(ctxQS.get('liff.state')).get('to')) ||
-        null;
-      if (to) sessionStorage.setItem('relay_to', to);
-    } catch {}
-  }
+  // ★ 重點：優先從 LIFF context 取 queryString（很多裝置把 liff.state 放這裡）
+  try {
+    const ctx = liff.getContext?.();
+    const qStr = ctx?.queryString || '';
+    if (qStr) {
+      const ctxQS = parseQS(qStr);
+      const fromCtx = extractFromParams(ctxQS);
+      if (!to && fromCtx.to) to = fromCtx.to;
+      if (!venuesid && fromCtx.venuesid) venuesid = fromCtx.venuesid;
+      if (!oeb && fromCtx.oeb) oeb = fromCtx.oeb;
+    }
+  } catch {}
+
+  // 最後備援：sessionStorage
+  if (!to) to = sessionStorage.getItem('relay_to');
 
   if (!to) {
-    // 仍找不到，輸出偵錯資訊協助定位
-    const debug = [
+    // 仍找不到，輸出偵錯資訊
+    let ctxQSStr = '';
+    try { ctxQSStr = (liff.getContext?.().queryString || '(無)'); } catch {}
+    out([
       '[錯誤] 缺少 to 參數',
       'location.search = ' + location.search,
       'location.hash   = ' + location.hash,
       'session.relay_to= ' + (sessionStorage.getItem('relay_to') || '(無)'),
-      'liff.getContext()?.queryString = ' + (liff.getContext?.().queryString || '(無)')
-    ].join('\n');
-    el.textContent = debug;
+      'liff context qs = ' + ctxQSStr
+    ].join('\n'));
     return;
   }
 
-  // 8) 取得 userId
+  sessionStorage.setItem('relay_to', to);
+
+  // 取得 userId（可選）
   let userId = '';
   try {
     const profile = await liff.getProfile();
     userId = profile?.userId || '';
   } catch {}
 
-  // 9) 組合最終網址（帶上 userId / venuesid / openExternalBrowser）
+  // 組成最終 URL
   const target = new URL(decodeURIComponent(to));
-  const targetQS = target.searchParams;
-  if (userId) targetQS.set('userId', userId);
-
-  // 可能存在於初始 URL 或 liff.state 內
-  const venuesid = qsNow.get('venuesid') || (qsNow.get('liff.state') && parseParams(qsNow.get('liff.state')).get('venuesid')) || null;
-  if (venuesid) targetQS.set('venuesid', venuesid);
+  const tQS = target.searchParams;
+  if (userId) tQS.set('userId', userId);
+  if (venuesid) tQS.set('venuesid', venuesid);
 
   const finalUrl = target.toString();
+  const openExternal =
+    oeb || locQS.get('openExternalBrowser') ||
+    (locQS.get('liff.state') && parseURLLikeParams(locQS.get('liff.state')).get('openExternalBrowser')) || null;
 
-  const oeb =
-    qsNow.get('openExternalBrowser') ||
-    (qsNow.get('liff.state') && parseParams(qsNow.get('liff.state')).get('openExternalBrowser')) ||
-    null;
-
-  // 10) 跳轉
-  if (oeb === '1' && liff.isInClient()) {
-    el.textContent = '即將於外部瀏覽器開啟…';
+  // 跳轉
+  if (openExternal === '1' && liff.isInClient()) {
+    out('即將於外部瀏覽器開啟…');
     liff.openWindow({ url: finalUrl, external: true });
   } else {
-    el.textContent = '跳轉中…';
+    out('跳轉中…');
     location.replace(finalUrl);
   }
 })();
