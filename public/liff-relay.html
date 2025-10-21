@@ -15,35 +15,62 @@
 (async () => {
   const el = document.getElementById('msg');
 
-  // ✅ 1. 嘗試從 URL query 或 sessionStorage 取回原始 to 參數
-  const currentParams = new URLSearchParams(location.search);
-  let to = currentParams.get('to') || sessionStorage.getItem('relay_to');
+  // 解析 URL 參數的小工具
+  function getSearchParams(urlLike) {
+    try {
+      // 若是相對路徑（例如 /liff-relay.html?to=...），用目前 origin 補上
+      const u = new URL(urlLike, location.origin);
+      return u.searchParams;
+    } catch {
+      return new URLSearchParams('');
+    }
+  }
 
-  // LINE LIFF 重新導回時會帶 liffClientId/code 等參數，會遺失 to
+  const currentParams = new URLSearchParams(location.search);
+
+  // 1) 先嘗試從目前網址直接取得 to
+  let to = currentParams.get('to');
+
+  // 2) 若沒有，嘗試從 liff.state 裡面還原（LIFF 深層連結會把 to 放在這裡）
+  if (!to) {
+    const liffState = currentParams.get('liff.state');
+    if (liffState) {
+      const stateParams = getSearchParams(liffState);
+      to = stateParams.get('to') || null;
+
+      // 把 liff.state 內的 openExternalBrowser / venuesid 也一併帶出來（若目前網址沒有）
+      if (!currentParams.get('openExternalBrowser') && stateParams.get('openExternalBrowser')) {
+        currentParams.set('openExternalBrowser', stateParams.get('openExternalBrowser'));
+      }
+      if (!currentParams.get('venuesid') && stateParams.get('venuesid')) {
+        currentParams.set('venuesid', stateParams.get('venuesid'));
+      }
+    }
+  }
+
+  // 3) 若還是沒有，從 sessionStorage 還原（登入後跳轉常發生）
   if (!to && document.referrer.includes('liff.line.me')) {
     to = sessionStorage.getItem('relay_to');
   }
+  if (!to) to = sessionStorage.getItem('relay_to');
 
-  // 沒有 to，直接提示
   if (!to) {
     el.textContent = '缺少 to 參數';
     return;
   }
+  // 把 to 暫存，讓授權跳轉回來時可還原
   sessionStorage.setItem('relay_to', to);
 
-  // ✅ 2. 取得 liffId
+  // 4) 取得 LIFF ID
   let liffId = '';
   try {
     const r = await fetch('/api/liff');
     const j = await r.json();
     liffId = j.liffId || '';
-  } catch (e) {}
-  if (!liffId) {
-    el.textContent = 'LIFF ID 無法取得，請確認 /api/liff 設定';
-    return;
-  }
+  } catch {}
+  if (!liffId) { el.textContent = 'LIFF 未設定（/api/liff 無回傳 liffId）'; return; }
 
-  // ✅ 3. 載入 LIFF SDK
+  // 5) 載入 LIFF SDK
   await new Promise((resolve, reject) => {
     const s = document.createElement('script');
     s.src = 'https://static.line-scdn.net/liff/edge/2/sdk.js';
@@ -52,45 +79,39 @@
     document.head.appendChild(s);
   });
 
-  // ✅ 4. 初始化 LIFF
-  try {
-    await liff.init({ liffId });
-  } catch (e) {
-    el.textContent = 'LIFF 初始化失敗：' + (e?.message || e);
-    return;
-  }
+  // 6) 初始化 LIFF
+  try { await liff.init({ liffId }); }
+  catch (e) { el.textContent = 'LIFF 初始化失敗：' + (e?.message || e); return; }
 
-  // ✅ 5. 未登入就要求登入（redirect 回來會保留 sessionStorage）
+  // 7) 未登入就導去登入（redirect 回本頁）
   if (!liff.isLoggedIn()) {
     el.textContent = '登入中…';
     liff.login({ redirectUri: location.href });
     return;
   }
 
-  // ✅ 6. 取得使用者 ID
+  // 8) 取得使用者 ID（可選）
   let userId = '';
   try {
     const profile = await liff.getProfile();
-    userId = profile.userId || '';
-  } catch (e) {
-    console.warn('取 userId 失敗', e);
-  }
+    userId = profile?.userId || '';
+  } catch {}
 
-  // ✅ 7. 組合最終網址
+  // 9) 組合最終導向網址（把 userId 與 venuesid 帶上）
   const target = new URL(decodeURIComponent(to));
-  const q = target.searchParams;
-  if (userId) q.set('userId', userId);
+  const qs = target.searchParams;
+  if (userId) qs.set('userId', userId);
 
-  // 保留 venuesid（若存在於原 query）
+  // venuesid / openExternalBrowser 可能來自目前網址或 liff.state
   const venuesid = currentParams.get('venuesid');
-  if (venuesid) q.set('venuesid', venuesid);
+  if (venuesid) qs.set('venuesid', venuesid);
 
   const finalUrl = target.toString();
 
-  // ✅ 8. 判斷是否開外部瀏覽器
+  // 10) 是否改用外部瀏覽器開啟
   const oeb = currentParams.get('openExternalBrowser');
   if (oeb === '1' && liff.isInClient()) {
-    el.textContent = '開啟外部瀏覽器中…';
+    el.textContent = '即將於外部瀏覽器開啟…';
     liff.openWindow({ url: finalUrl, external: true });
   } else {
     el.textContent = '跳轉中…';
