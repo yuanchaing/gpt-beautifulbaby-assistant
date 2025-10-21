@@ -6,6 +6,11 @@ import config from '../config/index.js';
 import { isMediaGenerationRequest } from '../utils/policy.js';
 import { matchFAQ } from '../utils/faq.js';
 
+const client = new line.Client({
+  channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
+  channelSecret: process.env.LINE_CHANNEL_SECRET,
+});
+
 async function readRawBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -24,7 +29,6 @@ function verifyLineSignature(rawBody, signature) {
 }
 
 function isLineVerifyTestEvent(events = []) {
-  // LINE Verify 測試事件常用兩種 token：all-zero 與 all-f
   const TEST_TOKENS = new Set([
     '00000000000000000000000000000000',
     'ffffffffffffffffffffffffffffffff'
@@ -33,24 +37,20 @@ function isLineVerifyTestEvent(events = []) {
 }
 
 export default async function handler(req, res) {
-  // GET：給 LINE 後台 Verify 頁先測（手動點網址）
+  // GET：給 LINE 後台手動點擊「驗證」的頁面先測
   if (req.method === 'GET') {
     return res.status(200).send('ok');
   }
-
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'method_not_allowed' });
   }
 
-  // 讀 raw body 並驗簽
   const rawBody = await readRawBody(req);
   const signature = req.headers['x-line-signature'] || '';
   if (!verifyLineSignature(rawBody, signature)) {
-    // 簽章錯誤一律回 401，協助你在 LINE 後台分辨憑證是否正確
     return res.status(401).json({ error: 'invalid_signature' });
   }
 
-  // 解析內容
   let payload = {};
   try {
     payload = JSON.parse(rawBody.toString('utf-8'));
@@ -60,34 +60,46 @@ export default async function handler(req, res) {
 
   const events = Array.isArray(payload.events) ? payload.events : [];
 
-  // ✅ 關鍵：遇到 LINE Verify 的測試事件，直接 200，避免你的業務邏輯嘗試 reply 造成 500
+  // LINE 後台 Verify 的測試事件：直接 200，避免誤觸業務邏輯
   if (isLineVerifyTestEvent(events) || events.length === 0) {
     return res.status(200).end();
   }
 
-  // 正常事件：先做 FAQ / 媒體請求預處理
+  // 先做簡單的 FAQ / 媒體策略預處理
   const patchedPayload = {
     ...payload,
     events: events.map((ev) => {
       const text = ev?.message?.text || '';
       const isMedia = isMediaGenerationRequest({ text, event: ev });
-      if (isMedia) return ev;
+      if (isMedia) return ev; // 交給策略層處理拒絕
       if (ev?.type === 'message' && ev?.message?.type === 'text') {
         const ans = matchFAQ(text, { minScore: 0.45 });
-        if (ans) {
-          return { ...ev, __faqHit: true, message: { ...ev.message, type: 'text', text: ans } };
-        }
+        if (ans) return { ...ev, __faqHit: true, message: { ...ev.message, type: 'text', text: ans } };
       }
       return ev;
     }),
   };
 
+  // 正式執行你原本的邏輯；若失敗就保底回覆
   try {
     await handleEvents(patchedPayload);
     if (config.APP_DEBUG) printPrompts();
     return res.status(200).end();
   } catch (e) {
-    // 任何未預期錯誤，仍回 200，避免 LINE 重試；同時回傳錯誤訊息協助除錯
-    return res.status(200).json({ warning: 'handled_with_error', detail: e?.message || String(e) });
+    // === 保底：逐筆回覆「已收到」或 FAQ 結果，避免聊天室沒回應 ===
+    try {
+      for (const ev of events) {
+        if (ev?.type !== 'message' || ev?.message?.type !== 'text') continue;
+        const text = ev.message.text || '';
+        const faq = matchFAQ(text, { minScore: 0.45 });
+        const replyText = faq || `已收到：${text}`;
+        await client.replyMessage(ev.replyToken, [{ type: 'text', text: replyText }]);
+      }
+      // 回 200，避免 LINE 重試
+      return res.status(200).json({ fallback: true, detail: e?.message || String(e) });
+    } catch (e2) {
+      // 即便 fallback 也失敗了，還是回 200，避免重複打擾使用者
+      return res.status(200).json({ fallback: false, error: e2?.message || String(e2) });
+    }
   }
 }
