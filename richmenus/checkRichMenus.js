@@ -1,37 +1,27 @@
-// ESM 版：列出 Rich Menu 與 Alias
-import 'dotenv/config';
+// ESM 版：列出所有 Rich Menus 與 Aliases
 import * as line from '@line/bot-sdk';
+import 'dotenv/config';
 
 const client = new line.Client({
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
   channelSecret: process.env.LINE_CHANNEL_SECRET,
 });
 
-async function main() {
-  try {
-    const menus = await client.getRichMenuList();
-    console.log('=== Rich Menus ===');
-    if (!menus?.length) console.log('(none)');
-    for (const m of menus || []) {
-      console.log(`- ${m.richMenuId} | name="${m.name}" | selected=${m.selected}`);
-    }
-  } catch (e) {
-    console.error('❌ 取得 RichMenu 失敗：', e.originalError?.response?.data || e.message);
+async function run() {
+  console.log('=== Rich Menus ===');
+  const menus = await client.getRichMenuList().catch(() => ({ richmenus: [] }));
+  for (const m of menus || []) {
+    console.log(`- ${m.richMenuId} | name="${m.name}" | selected=${m.selected}`);
   }
 
-  try {
-    const aliasList = await client.getRichMenuAliasList();
-    console.log('\n=== Aliases ===');
-    if (!aliasList.aliases?.length) console.log('(none)');
-    for (const a of aliasList.aliases || []) {
-      console.log(`- ${a.richMenuAliasId} -> ${a.richMenuId}`);
-    }
-  } catch (e) {
-    console.error('❌ 取得 Alias 失敗：', e.originalError?.response?.data || e.message);
+  console.log('\n=== Aliases ===');
+  const aliases = await client.getRichMenuAliasList().catch(() => ({ aliases: [] }));
+  for (const a of aliases.aliases || []) {
+    console.log(`- ${a.richMenuAliasId} -> ${a.richMenuId}`);
   }
 }
 
-main().catch((e) => {
-  console.error('Fatal:', e);
+run().catch((e) => {
+  console.error(e?.originalError?.response?.data || e);
   process.exit(1);
 });

@@ -10,13 +10,13 @@
     },
     {
       "bounds": { "x": 833, "y": 0, "width": 834, "height": 843 },
-      "action": { "type": "richmenuswitch", "richMenuAliasId": "submenu-ar", "data": "goto-ar" }
+      "action": { "type": "richmenuswitch", "richMenuAliasId": "submenu-ar", "data": "to-ar-submenu" }
     },
     {
       "bounds": { "x": 1667, "y": 0, "width": 833, "height": 843 },
       "action": {
         "type": "uri",
-        "uri": "https://liff.line.me/LIFF_ID_REPLACE?to=https%3A%2F%2Farcompletions.onrender.com%2Findex.html&openExternalBrowser=1"
+        "uri": "https://liff.line.me/LIFF_ID_REPLACE?liff.state=%2Fliff-relay.html%3Fto%3Dhttps%253A%252F%252Farcompletions.onrender.com%252Findex.html%26openExternalBrowser%3D1"
       }
     },
     {
@@ -27,7 +27,7 @@
       "bounds": { "x": 833, "y": 843, "width": 834, "height": 843 },
       "action": {
         "type": "uri",
-        "uri": "https://liff.line.me/LIFF_ID_REPLACE?to=https%3A%2F%2Farcompletions.onrender.com%2Fcoupon.html&openExternalBrowser=1"
+        "uri": "https://liff.line.me/LIFF_ID_REPLACE?liff.state=%2Fliff-relay.html%3Fto%3Dhttps%253A%252F%252Farcompletions.onrender.com%252Fcoupon.html%26openExternalBrowser%3D1"
       }
     },
     {
