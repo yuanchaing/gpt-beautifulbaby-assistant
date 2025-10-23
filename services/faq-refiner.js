@@ -9,6 +9,7 @@ const {
   BOT_NAME = 'AI',
   BOT_INIT_PROMPT = '',
   BOT_TONE = '',
+  FAQ_REFINED_MAXLEN, // 允許空
 } = process.env;
 
 /**
@@ -16,13 +17,17 @@ const {
  * @param {object} payload
  * @param {string} payload.question 原始問題（可無）
  * @param {string} payload.rawAnswer FAQ 原始答案（必填）
- * @param {number} [payload.maxLen=200] 期望最大字數
+ * @param {number} [payload.maxLen] 覆寫最大字數；<=0 或未填表示不限制
  * @returns {Promise<string>}
  */
-export async function refineWithPersona({ question = '', rawAnswer, maxLen = 200 }) {
+export async function refineWithPersona({ question = '', rawAnswer, maxLen }) {
   if (!rawAnswer) return '';
 
-  // system：APP_INIT_PROMPT + BOT 名稱/語氣，讓模型從一開始就知道人設邊界
+  // 最終限制值：優先使用參數，其次使用環境變數；<=0 或 NaN → 視為不限制
+  const envLen = Number(FAQ_REFINED_MAXLEN);
+  const mergedLen = (typeof maxLen === 'number') ? maxLen : envLen;
+  const unlimited = !mergedLen || Number.isNaN(mergedLen) || mergedLen <= 0;
+
   const system = [
     APP_INIT_PROMPT?.trim() || '',
     `你現在的身份是「${BOT_NAME || 'AI'}」。語氣（Tone）：${BOT_TONE || '自然、專業、友善'}`,
@@ -33,29 +38,33 @@ export async function refineWithPersona({ question = '', rawAnswer, maxLen = 200
   const botKickoff = (BOT_INIT_PROMPT || '').trim();
 
   const langHint = (() => {
-    // 與官方文件一致，APP_LANG 支援 zh_TW / zh_CN / en / ja
     switch (APP_LANG) {
-      case 'zh_TW':
-        return '請使用繁體中文回覆。';
-      case 'zh_CN':
-        return '请使用简体中文回复。';
-      case 'en':
-        return 'Reply in natural English.';
-      case 'ja':
-        return '日本語で回答してください。';
-      default:
-        return 'Reply in the user locale.';
+      case 'zh_TW': return '請使用繁體中文回覆。';
+      case 'zh_CN': return '请使用简体中文回复。';
+      case 'en':   return 'Reply in natural English.';
+      case 'ja':   return '日本語で回答してください。';
+      default:     return 'Reply in the user locale.';
     }
   })();
 
-  const instruction = [
+  const rules = [
     '請依人設優化下列 FAQ 回覆內容，但必須保持事實與原意不變：',
     '— 可重寫句子使更友善、具體、好讀。',
     '— 可加入簡短的步驟化條列，但不要新增未提供的新事實。',
-    `— 最多 ${maxLen} 字；必要時可用項目符號。`,
-    '— 若包含連結，請保留原網址。',
-    langHint,
-    '',
+  ];
+
+  // 只有在有限制時才加入長度提示
+  if (!unlimited) {
+    rules.push(`— 最多 ${mergedLen} 字；必要時可用項目符號。`);
+  } else {
+    // 不限制：可鼓勵充分敘述，但仍保持重點清楚
+    rules.push('— 盡量完整詳盡，條理清晰；必要時使用條列與小標。');
+  }
+
+  rules.push(langHint, '');
+
+  const instruction = [
+    ...rules,
     question ? `【原始問題】\n${question}\n` : '',
     `【原始答案】\n${rawAnswer}`,
   ].join('\n');
@@ -67,6 +76,8 @@ export async function refineWithPersona({ question = '', rawAnswer, maxLen = 200
     { role: 'user', content: instruction },
   ];
 
-  const refined = await chatCompletions(messages);
+  // 不限制字數 → 不帶 max_tokens；否則沿用預設
+  const options = unlimited ? { max_tokens: null } : {};
+  const refined = await chatCompletions(messages, options);
   return (refined || '').trim();
 }
