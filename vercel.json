@@ -2,9 +2,7 @@
   "functions": {
     "api/**/*": {
       "maxDuration": 10,
-      "includeFiles": [
-        "storage/**"
-      ],
+      "includeFiles": "storage/**",
       "runtime": "nodejs18.x"
     }
   }
