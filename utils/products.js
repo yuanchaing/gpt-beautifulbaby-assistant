@@ -9,13 +9,10 @@ let _cacheMtime = 0;
 function projectRootDir() {
   const __filename = fileURLToPath(import.meta.url);
   const __dirname = path.dirname(__filename);
-  // utils/ → 專案根的上一層可能就是 ../
-  // 這裡直接以相對於 utils 的 ../storage/products.json
   return path.resolve(__dirname, '..');
 }
 
 function productsPath() {
-  // 預設路徑：<projectRoot>/storage/products.json
   return path.join(projectRootDir(), 'storage', 'products.json');
 }
 
@@ -54,7 +51,6 @@ function pickField(obj, aliases) {
       }
     }
   }
-  // 寬鬆比對（包含）
   for (const key of Object.keys(obj)) {
     const k = String(key).toLowerCase();
     if (aliases.some(a => k.includes(String(a).toLowerCase()))) {
@@ -71,10 +67,22 @@ function normalizeText(s = '') {
     .replace(/[^\p{Letter}\p{Number}]+/gu, '');
 }
 
+// 專門處理查詢句子，把無意義的語氣/疑問詞去掉
+function normalizeQueryMeaningful(s = '') {
+  let t = String(s || '').toLowerCase();
+  const removeList = [
+    '多少錢','多少?', '多少？','多少', '價格', '價錢', '價', '幾塊', '$', '元',
+    '可以買', '有賣嗎', '有賣', '買得到', '嗎', '呢', '呀', '啊', '請問', '是什麼', '是甚麼',
+    '的', '是不是', '有沒有', '請', '謝謝', '想問', '想請問'
+  ];
+  for (const w of removeList) {
+    t = t.replaceAll(w, '');
+  }
+  return t;
+}
+
 function tokenSet(str = '') {
-  // 以中文字/數字/英文字元拆分為 token；對中文，這裡就以單字元集合近似
   const norm = normalizeText(str);
-  // 英文以簡單切字；中文直接每個字元
   const tokens = norm.split('');
   return new Set(tokens.filter(Boolean));
 }
@@ -85,12 +93,11 @@ function similarity(a = '', b = '') {
   if (A.size === 0 || B.size === 0) return 0;
   let inter = 0;
   for (const t of A) if (B.has(t)) inter++;
-  const score = inter / Math.max(A.size, B.size);
-  // 若 b 完全包含 a（或相反），額外加分
+  let score = inter / Math.max(A.size, B.size);
   const an = normalizeText(a);
   const bn = normalizeText(b);
   if (an && bn && (bn.includes(an) || an.includes(bn))) {
-    return Math.min(1, score + 0.25);
+    score = Math.min(1, score + 0.25);
   }
   return score;
 }
@@ -115,7 +122,9 @@ function extractFields(row) {
 export function matchProducts(query, { limit = 5, minScore = 0.35 } = {}) {
   const items = loadJSONSafe(productsPath());
   if (!items.length || !query) return [];
-  const q = String(query || '');
+  // 先去掉疑問詞/價格詞彙，避免干擾
+  const qClean = normalizeQueryMeaningful(query);
+  const q = qClean || query;
 
   const scored = [];
   for (const row of items) {
@@ -126,14 +135,13 @@ export function matchProducts(query, { limit = 5, minScore = 0.35 } = {}) {
     const sSpec = similarity(q, String(f.spec || ''));
     const sSku  = similarity(q, String(f.sku || ''));
 
-    // 加權：名稱 0.7，規格 0.2，SKU 0.1
     const score = sName * 0.7 + sSpec * 0.2 + sSku * 0.1;
 
     if (score >= minScore) {
       scored.push({ score, data: f });
     } else {
-      // 若查詢裡出現「價格/多少錢/多少$」，且名稱包含關鍵字，放寬門檻
-      const priceIntent = /價|多少錢|多少\?|多少|price|\$|元/.test(q);
+      // 若使用者真的在問價格（原始 query 含價格意圖），放寬條件
+      const priceIntent = /價|多少錢|多少\?|多少|price|\$|元/.test(String(query));
       if (priceIntent && normalizeText(f.name).includes(normalizeText(q).slice(0, 4))) {
         scored.push({ score: minScore, data: f });
       }
@@ -146,13 +154,10 @@ export function matchProducts(query, { limit = 5, minScore = 0.35 } = {}) {
 
 /**
  * 把比對結果格式化成客服可讀訊息
- * @param {Array<{score:number, data: ReturnType<typeof extractFields>}>} matches
- * @param {string} originalQuery
  */
 export function formatProductAnswer(matches, originalQuery = '') {
   if (!matches || !matches.length) return '目前查無相關商品，您可以提供更明確的商品名稱或規格關鍵字唷～';
 
-  // 單筆命中 → 輸出完整資訊；多筆 → 列表摘要
   if (matches.length === 1) {
     const { name, spec, price, discount, plan, note, sku } = matches[0].data;
     const lines = [];
@@ -180,4 +185,37 @@ export function formatProductAnswer(matches, originalQuery = '') {
   }).join('\n');
   const tail = '\n若需要更精準結果，您可以多提供口味/口感/包裝數量等關鍵字～';
   return [head, body, tail].join('\n');
+}
+
+// ======= 供 /api/debug-products 使用的統計與除錯輸出 =======
+export function productCatalogStats() {
+  const p = productsPath();
+  let exists = false;
+  let count = 0;
+  let sampleNames = [];
+  try {
+    exists = fs.existsSync(p);
+    if (exists) {
+      const items = loadJSONSafe(p);
+      count = items.length;
+      sampleNames = items.slice(0, 5).map(r => {
+        const f = extractFields(r);
+        return f.name || '(無商品名稱)';
+      });
+    }
+  } catch {}
+  return { path: p, exists, count, sampleNames };
+}
+
+export function debugMatchProducts(query, { limit = 8, minScore = 0.35 } = {}) {
+  const matches = matchProducts(query, { limit, minScore });
+  return matches.map(({ score, data }) => ({
+    score: Number(score.toFixed(4)),
+    name: data.name ?? null,
+    spec: data.spec ?? null,
+    price: data.price ?? null,
+    discount: data.discount ?? null,
+    plan: data.plan ?? null,
+    note: data.note ?? null,
+  }));
 }
