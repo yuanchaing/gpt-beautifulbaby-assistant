@@ -12,15 +12,12 @@
       "bounds": { "x": 833, "y": 0, "width": 834, "height": 843 },
       "action": {
         "type": "uri",
-        "uri": "https://liff.line.me/LIFF_ID_REPLACE?liff.state=%3Fto%3Dhttps%253A%252F%252Farcompletions.onrender.com%252Findex.html%26openExternalBrowser%3D1"
+        "uri": "https://liff.line.me/LIFF_ID_REPLACE?liff.state=%3Fto%3Dhttps%253A%252F%252Farcompletions.onrender.com%252Findex.html"
       }
     },
     {
       "bounds": { "x": 1667, "y": 0, "width": 833, "height": 843 },
-      "action": {
-        "type": "uri",
-        "action": { "type": "message", "text": "AI客服" }
-      }
+      "action": { "type": "message", "text": "AI客服" }
     },
     {
       "bounds": { "x": 0, "y": 843, "width": 833, "height": 843 },
@@ -30,7 +27,7 @@
       "bounds": { "x": 833, "y": 843, "width": 834, "height": 843 },
       "action": {
         "type": "uri",
-        "uri": "https://liff.line.me/LIFF_ID_REPLACE?liff.state=%3Fto%3Dhttps%253A%252F%252Farcompletions.onrender.com%252Fcoupon.html%26openExternalBrowser%3D1"
+        "uri": "https://liff.line.me/LIFF_ID_REPLACE?liff.state=%3Fto%3Dhttps%253A%252F%252Farcompletions.onrender.com%252Fcoupon.html"
       }
     },
     {

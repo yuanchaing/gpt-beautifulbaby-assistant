@@ -1,4 +1,4 @@
-// ESM 版：建立主選單 + 子選單，傳圖、設 alias、設主選單為預設
+// richmenus/createRichMenus.js (ESM)
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
@@ -6,60 +6,64 @@ import * as line from '@line/bot-sdk';
 import 'dotenv/config';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ROOT = path.join(__dirname, '..'); // 專案根目錄
+const ROOT = path.join(__dirname, '..');
 const RM_DIR = path.join(ROOT, 'richmenus');
 
 const client = new line.Client({
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
-  channelSecret: process.env.LINE_CHANNEL_SECRET,
+  channelSecret: process.env.LINE_CHANNEL_SECRET
 });
 
-function readJsonWithLiffReplace(filename) {
-  const p = path.join(RM_DIR, filename);
+function exists(p) { try { fs.accessSync(p); return true; } catch { return false; } }
+
+function loadJSONWithLiffReplace(file) {
+  const p = path.join(RM_DIR, file);
   let raw = fs.readFileSync(p, 'utf8');
-  raw = raw.replace(/LIFF_ID_REPLACE/g, process.env.LIFF_ID || '');
-  return JSON.parse(raw);
+  return JSON.parse(raw.replace(/LIFF_ID_REPLACE/g, process.env.LIFF_ID || ''));
 }
 
-async function createOne({ json, img, alias, setDefault = false }) {
-  const data = readJsonWithLiffReplace(json);
-  const id = await client.createRichMenu(data);
-  console.log(`Created: ${alias} -> ${id}`);
+async function createMenu(jsonName, imageName, aliasId, setDefault = false) {
+  const data = loadJSONWithLiffReplace(jsonName);
+  const richMenuId = await client.createRichMenu(data);
+  console.log(`[create] ${jsonName} -> ${richMenuId}`);
 
-  const imgPath = path.join(RM_DIR, img);
-  const buf = fs.readFileSync(imgPath);
-  await client.setRichMenuImage(id, buf, 'image/png');
-  console.log(`Image uploaded: ${img}`);
+  if (imageName) {
+    const imgPath = path.join(RM_DIR, imageName);
+    const buf = fs.readFileSync(imgPath);
+    await client.setRichMenuImage(richMenuId, buf, 'image/png');
+    console.log(`[image] ${imageName} uploaded`);
+  }
 
-  // 先刪掉同名 alias（避免重複建立失敗）
-  try { await client.deleteRichMenuAlias(alias); } catch {}
-  await client.createRichMenuAlias(id, alias);
-  console.log(`Alias set: ${alias}`);
+  // clear same alias if any, then create alias
+  if (aliasId) {
+    try { await client.deleteRichMenuAlias(aliasId); } catch {}
+    await client.createRichMenuAlias(richMenuId, aliasId);
+    console.log(`[alias] ${aliasId} -> ${richMenuId}`);
+  }
 
   if (setDefault) {
-    await client.setDefaultRichMenu(id);
-    console.log('Set as DEFAULT rich menu.');
+    await client.setDefaultRichMenu(richMenuId);
+    console.log(`[default] set ${richMenuId}`);
   }
-  return id;
+  return richMenuId;
 }
 
 async function run() {
-  console.log('=== Create Rich Menus (main + ar) ===');
+  console.log('=== Create Rich Menus (auto-detect) ===');
 
-  const mainId = await createOne({
-    json: 'main.json',
-    img: 'main.png',
-    alias: 'main-menu',
-    setDefault: true,
-  });
+  // main
+  const mainId = await createMenu('main.json', 'main.png', 'main-menu', true);
 
-  await createOne({
-    json: 'ar.json',
-    img: 'ar.png',
-    alias: 'submenu-ar',
-  });
+  // optional ar submenu
+  const arJson = path.join(RM_DIR, 'ar.json');
+  const arImg = path.join(RM_DIR, 'ar.png');
+  if (exists(arJson) && exists(arImg)) {
+    await createMenu('ar.json', 'ar.png', 'submenu-ar', false);
+  } else {
+    console.log('[skip] ar submenu not found (richmenus/ar.json or ar.png missing).');
+  }
 
-  console.log('All created. Default ->', mainId);
+  console.log('All done. Default ->', mainId);
 }
 
 run().catch((e) => {
