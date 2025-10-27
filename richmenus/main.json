@@ -12,7 +12,8 @@
       "bounds": { "x": 833, "y": 0, "width": 834, "height": 843 },
       "action": {
         "type": "uri",
-        "uri": "https://liff.line.me/LIFF_ID_REPLACE?liff.state=%3Fto%3Dhttps%253A%252F%252Farcompletions.onrender.com%252Findex.html"
+        "label": "AR活動",
+        "uri": "https://liff.line.me/2008287433-pJxD7oz9?to=https%3A%2F%2Farcompletions.onrender.com%2Findex.html&liffId=2008287433-pJxD7oz9"
       }
     },
     {
@@ -27,7 +28,8 @@
       "bounds": { "x": 833, "y": 843, "width": 834, "height": 843 },
       "action": {
         "type": "uri",
-        "uri": "https://liff.line.me/LIFF_ID_REPLACE?liff.state=%3Fto%3Dhttps%253A%252F%252Farcompletions.onrender.com%252Fcoupon.html"
+        "label": "優惠券",
+        "uri": "https://liff.line.me/2008287433-pJxD7oz9?to=https%3A%2F%2Farcompletions.onrender.com%2Fcoupon.html&liffId=2008287433-pJxD7oz9"
       }
     },
     {

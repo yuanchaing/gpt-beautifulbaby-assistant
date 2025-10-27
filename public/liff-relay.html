@@ -15,6 +15,7 @@
     #panel{display:none}
     pre{background:#0f172a;color:#cbd5e1;border-radius:8px;padding:12px;overflow:auto;font-size:12px;line-height:1.5;white-space:pre-wrap}
     button{padding:10px 14px;border:0;border-radius:8px;background:#111;color:#fff;font-size:16px}
+    code{background:#f1f5f9;padding:.1em .35em;border-radius:.35em}
   </style>
   <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
 </head>
@@ -33,58 +34,59 @@
   </div>
 
   <script>
-    // 多層 URL 解碼（處理 %252F 這類）
-    function multiDecode(s, times = 3) {
-      if (!s) return s;
-      let out = String(s);
-      for (let i = 0; i < times; i++) {
-        try {
-          const dec = decodeURIComponent(out);
-          if (dec === out) break;
-          out = dec;
-        } catch { break; }
-      }
-      return out;
-    }
-    function parseQS(qsLike) {
-      if (!qsLike) return new URLSearchParams('');
-      let qs = String(qsLike).trim();
-      if (qs.startsWith('?') || qs.startsWith('#')) qs = qs.slice(1);
-      return new URLSearchParams(qs);
-    }
-    function getParam(name){
-      const usp = new URLSearchParams(location.search);
-      return usp.get(name);
-    }
-    function findToParam() {
+    /*** 你可以把 LIFF_ID 直接寫死在這裡，或用 ?liffId= 由 URL 傳入 ***/
+    const DEFAULT_LIFF_ID = "2008287433-pJxD7oz9"; // ← 改成你的 LIFF ID（建議）
+    /*************************************************************************/
+
+    function getParam(name){ return new URLSearchParams(location.search).get(name); }
+    function multiDecode(s, times=3){ if(!s) return s; let o=String(s); for(let i=0;i<times;i++){ try{ const d=decodeURIComponent(o); if(d===o) break; o=d; }catch{ break; } } return o; }
+    function parseQS(qsLike){ if(!qsLike) return new URLSearchParams(''); let qs=String(qsLike).trim(); if(qs.startsWith('?')||qs.startsWith('#')) qs=qs.slice(1); return new URLSearchParams(qs); }
+    function safeHttpUrl(u){ try{ const url=new URL(u); return /^(http|https):$/i.test(url.protocol); }catch{ return false; } }
+
+    function findToParam(){
       const usp = new URLSearchParams(location.search);
       let to = usp.get('to');
-      if (!to) {
+
+      // liff.state 內含 to（多層編碼/巢狀）
+      if(!to){
         const ls = usp.get('liff.state');
-        if (ls) {
+        if(ls){
           const s1 = multiDecode(ls);
           const p1 = parseQS(s1);
           to = p1.get('to');
-          if (!to) {
+          if(!to){
             const ls2 = p1.get('liff.state');
-            if (ls2) {
-              const s2 = multiDecode(ls2);
-              to = parseQS(s2).get('to');
+            if(ls2){
+              to = parseQS(multiDecode(ls2)).get('to');
             }
           }
         }
       }
-      if (!to && location.hash) {
-        to = parseQS(location.hash).get('to');
-      }
-      if (to) to = multiDecode(to);
-      return to;
+      if(!to && location.hash){ to = parseQS(location.hash).get('to'); }
+      if(to) to = multiDecode(to);
+      return to || null;
     }
-    function safeHttpUrl(u) {
-      try {
-        const url = new URL(u);
-        return /^(http|https):$/i.test(url.protocol);
-      } catch { return false; }
+
+    async function ensureLiffReadyAndLogin(liffId){
+      await liff.init({ liffId });
+      if(!liff.isLoggedIn()){
+        // 讓 LIFF 完成登入，回跳本頁後再繼續
+        liff.login({ redirectUri: location.href });
+        return new Promise(()=>{}); // login 會跳轉，這裡不再繼續
+      }
+      await liff.ready;
+    }
+
+    async function getUserIdSafe(){
+      try{
+        // 1) 先用 context（在 LINE app 內通常可取到）
+        const ctx = liff.getContext?.();
+        if(ctx?.userId) return ctx.userId;
+        // 2) 取不到就用 profile（需已登入）
+        const prof = await liff.getProfile();
+        if(prof?.userId) return prof.userId;
+      }catch{}
+      return null;
     }
 
     (async () => {
@@ -93,55 +95,55 @@
       const showDebug = (getParam('debug') === '1');
 
       const toRaw = findToParam();
-      if (!toRaw) {
+      if(!toRaw){
         titleEl.innerHTML = '開啟失敗';
         tipEl.innerHTML = '未帶到 <code>to</code> 參數，請確認 URL 是否正確。';
         return;
       }
-      if (!safeHttpUrl(toRaw)) {
+      if(!safeHttpUrl(toRaw)){
         titleEl.innerHTML = '開啟失敗';
         tipEl.innerHTML = 'to 參數不是有效的 http(s) URL：<br><code>' + toRaw + '</code>';
         return;
       }
 
-      // 嘗試從 LIFF 取得 userId，若取不到就略過
-      let finalUrl = toRaw;
-      try {
-        await liff.init({ liffId: "DUMMY" }).catch(()=>{});
-        const ctx = liff.getContext ? liff.getContext() : null;
-        const uid = ctx?.userId || null;
-
-        const urlObj = new URL(finalUrl);
-        if (uid && !urlObj.searchParams.has('userid')) {
-          urlObj.searchParams.set('userid', uid);
-        }
-        finalUrl = urlObj.href;
-
-        if (showDebug) {
-          document.getElementById('uidHint').textContent = uid
-            ? `已注入 userid=${uid}`
-            : '未能從 LIFF 取得 userId（可能非 1:1 chat 或權限受限），已照原網址導向。';
-        }
-      } catch {
-        // 失敗就照原網址導向
-      }
-
-      // debug 預覽模式：手機也能看見最終網址（含 userid）
-      if (showDebug) {
-        titleEl.textContent = '預覽即將開啟的頁面';
-        document.getElementById('panel').style.display = 'block';
-        document.getElementById('finalUrlBox').textContent = finalUrl;
-
-        // 2 秒後自動前往，或點按鈕立即前往
-        let jumped = false;
-        const go = () => { if (!jumped) { jumped = true; location.replace(finalUrl); } };
-        document.getElementById('goBtn').addEventListener('click', go);
-        setTimeout(go, 2000);
+      // 1) 初始化 LIFF 並（必要時）自動登入
+      const liffId = getParam('liffId') || DEFAULT_LIFF_ID;
+      try{
+        await ensureLiffReadyAndLogin(liffId);
+      }catch(e){
+        // 若真的無法初始化，仍然嘗試直接外開（但無法帶 userId）
+        const fallback = new URL(toRaw).href;
+        liff.openWindow({ url: fallback, external: true });
         return;
       }
 
-      // 一般模式：直接跳轉
-      location.replace(finalUrl);
+      // 2) 取得 userId（context 優先，profile 備援）
+      const uid = await getUserIdSafe();
+
+      // 3) 把 userId 注入到目標網址（若本來沒有）
+      const urlObj = new URL(toRaw);
+      if(uid && !urlObj.searchParams.has('userid')){
+        urlObj.searchParams.set('userid', uid);
+      }
+      const finalUrl = urlObj.href;
+
+      // 4) 外開瀏覽器
+      if(showDebug){
+        // 手機驗證模式：先顯示最終網址（含 userid），2 秒後自動外開
+        document.getElementById('panel').style.display='block';
+        document.getElementById('finalUrlBox').textContent = finalUrl;
+        document.getElementById('uidHint').textContent = uid
+          ? `已注入 userid=${uid}`
+          : '未能從 LIFF 取得 userId（可能非 1:1 chat 或權限受限），將直接外開。';
+        let jumped=false;
+        const go=()=>{ if(!jumped){ jumped=true; liff.openWindow({ url: finalUrl, external: true }); }};
+        document.getElementById('goBtn').addEventListener('click', go);
+        setTimeout(go, 2000);
+        titleEl.textContent = '預覽即將開啟的頁面';
+        return;
+      }
+
+      liff.openWindow({ url: finalUrl, external: true });
     })();
   </script>
 </body>
