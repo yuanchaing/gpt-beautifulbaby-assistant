@@ -50,11 +50,8 @@
     function findToParam() {
       const href = String(location.href);
       const usp = new URLSearchParams(location.search);
-
-      // 1) 直接 ?to=
       let to = usp.get('to');
 
-      // 2) liff.state 內含 to（可能多層編碼/巢狀）
       if (!to) {
         const ls = usp.get('liff.state');
         if (ls) {
@@ -70,7 +67,7 @@
           }
         }
       }
-      // 3) hash 兜底
+
       if (!to && location.hash) {
         to = parseQS(location.hash).get('to');
       }
@@ -92,7 +89,6 @@
         to: info.to || null,
         raw: { href: info.href, liffState: info.liffState }
       };
-
       if (showDebug) {
         const pre = document.getElementById('debug');
         pre.style.display = 'block';
@@ -104,30 +100,35 @@
 
       if (!info.to) {
         titleEl.innerHTML = '開啟失敗';
-        tipEl.innerHTML = '未帶到 <code>to</code> 參數，請確認 LIFF 入口 URL 是否包含 <code>?to=</code> 或 <code>liff.state</code> 內含 to。';
-        if (showDebug === false) {
-          // 若沒開 debug，就顯示最基本訊息
-          const pre = document.getElementById('debug');
-          pre.style.display = 'block';
-          pre.textContent = JSON.stringify(debugPayload, null, 2);
-        }
+        tipEl.innerHTML = '未帶到 <code>to</code> 參數，請確認 URL 是否正確。';
         return;
       }
-
       if (!safeHttpUrl(info.to)) {
         titleEl.innerHTML = '開啟失敗';
         tipEl.innerHTML = 'to 參數不是有效的 http(s) URL：<br><code>' + info.to + '</code>';
         return;
       }
 
-      // 是否外開瀏覽器（可選）
-      const openExternal = (getParam('openExternalBrowser') || '').toLowerCase() === 'true';
       try {
-        if (openExternal && window.liff) {
-          await liff.init({ liffId: "DUMMY" }).catch(()=>{});
-          liff.openWindow({ url: info.to, external: true });
+        // 初始化 LIFF 以取得 context.userId
+        await liff.init({ liffId: "DUMMY" }).catch(()=>{});
+        let userId = null;
+        if (liff.getContext) {
+          const ctx = liff.getContext();
+          userId = ctx?.userId || null;
+        }
+
+        // 若 to 裡沒有 userid，就自動加上
+        let target = new URL(info.to);
+        if (userId && !target.searchParams.has("userid")) {
+          target.searchParams.set("userid", userId);
+        }
+
+        const openExternal = (getParam('openExternalBrowser') || '').toLowerCase() === 'true';
+        if (openExternal) {
+          liff.openWindow({ url: target.href, external: true });
         } else {
-          location.replace(info.to);
+          location.replace(target.href);
         }
       } catch (e) {
         titleEl.innerHTML = '開啟失敗';
