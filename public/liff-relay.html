@@ -122,8 +122,8 @@
 
       // 3) 把 userId 注入到目標網址（若本來沒有）
       const urlObj = new URL(toRaw);
-      if(uid && !urlObj.searchParams.has('userid')){
-        urlObj.searchParams.set('userid', uid);
+      if(uid && !urlObj.searchParams.has('userId')){
+        urlObj.searchParams.set('userId', uid);
       }
       const finalUrl = urlObj.href;
 
