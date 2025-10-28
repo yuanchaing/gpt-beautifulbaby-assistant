@@ -14,6 +14,7 @@ try {
 function normalize(str) {
   return String(str || "").toLowerCase().replace(/\s+/g, "").trim();
 }
+
 function toBigrams(str) {
   const s = normalize(str);
   if (s.length < 2) return s ? [s] : [];
@@ -21,6 +22,7 @@ function toBigrams(str) {
   for (let i = 0; i < s.length - 1; i++) arr.push(s.slice(i, i + 2));
   return arr;
 }
+
 function diceSimilarity(a, b) {
   const A = toBigrams(a);
   const B = toBigrams(b);
@@ -38,18 +40,19 @@ function diceSimilarity(a, b) {
   return (2 * inter) / (A.length + B.length);
 }
 
-export function matchFAQ(input, { minScore = 0.4 } = {}) {
+export function matchFAQ(input, { minScore = 0.5 } = {}) {
   if (!Array.isArray(FAQ_LIST) || FAQ_LIST.length === 0) return null;
-  const questions = FAQ_LIST.map((q) => q.question || q.q).filter(Boolean);
-  if (questions.length === 0) return null;
+  const normalizedInput = normalize(input);
 
+  // 完全包含命中
   const contain = FAQ_LIST.find(
     (item) =>
-      normalize(item?.question || "").includes(normalize(input)) ||
-      normalize(input).includes(normalize(item?.question || ""))
+      normalize(item?.question || "").includes(normalizedInput) ||
+      normalizedInput.includes(normalize(item?.question || ""))
   );
   if (contain) return contain.answer || contain.a || null;
 
+  // 嚴格模糊比對
   let best = { item: null, score: 0 };
   for (const item of FAQ_LIST) {
     const qText = item?.question || item?.q || "";
@@ -57,7 +60,8 @@ export function matchFAQ(input, { minScore = 0.4 } = {}) {
     if (score > best.score) best = { item, score };
   }
 
-  const dynamicMin = normalize(input).length <= 4 ? 0.25 : minScore;
+  // 降低短詞誤命中
+  const dynamicMin = normalizedInput.length <= 4 ? 0.6 : minScore;
   if (best.score < dynamicMin) return null;
   return best.item?.answer || best.item?.a || null;
 }
