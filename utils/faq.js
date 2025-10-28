@@ -112,3 +112,27 @@ export function matchFAQ(input, options = {}) {
   const found = findFAQ(input, options);
   return found?.item?.a || null;
 }
+
+
+// 用於廠商延伸查詢：在 FAQ 裡搜尋該品牌關鍵字的所有答案內容
+export function findRelatedFAQContent(keyword) {
+  if (!Array.isArray(FAQ_LIST) || FAQ_LIST.length === 0) return null;
+  if (!keyword) return null;
+
+  const lower = keyword.toLowerCase();
+  const related = FAQ_LIST
+    .filter(item => {
+      const qs = Array.isArray(item?.q) ? item.q.join(' ') : '';
+      const a = item?.a || '';
+      const text = `${qs} ${a}`.toLowerCase();
+      return text.includes(lower);
+    })
+    .map(item => {
+      const title = Array.isArray(item?.q) ? item.q[0] : item?.q;
+      return `【${title}】\n${item.a}`;
+    })
+    .join('\n\n');
+
+  return related || null;
+}
+

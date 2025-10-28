@@ -2,35 +2,33 @@
 import crypto from "crypto";
 import * as line from "@line/bot-sdk";
 import { isMediaGenerationRequest } from "../utils/policy.js";
-import { matchFAQ } from "../utils/faq.js";
+import { matchFAQ, findRelatedFAQContent } from "../utils/faq.js";
 import { refineWithPersona } from "../services/faq-refiner.js";
 import fetch from "node-fetch";
 import { matchProducts, formatProductAnswer } from "../utils/products.js";
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
-const OPENAI_COMPLETION_MODEL = process.env.OPENAI_COMPLETION_MODEL || "gpt-4o";
-const LINE_CHANNEL_ACCESS_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN;
-const LINE_CHANNEL_SECRET = process.env.LINE_CHANNEL_SECRET;
-
+// ===== LINE Client =====
 const client = new line.Client({
-  channelAccessToken: LINE_CHANNEL_ACCESS_TOKEN,
-  channelSecret: LINE_CHANNEL_SECRET
+  channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
+  channelSecret: process.env.LINE_CHANNEL_SECRET
 });
 
-// ======== 分段設定 ========
-const LINE_REPLY_MAX = 5;
+// ===== AI 設定 =====
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
+const OPENAI_COMPLETION_MODEL = process.env.OPENAI_COMPLETION_MODEL || "gpt-4o";
+
+// ===== 分段設定 =====
 const LINE_SAFE_LEN = Number(process.env.LINE_SAFE_LEN || 1800);
+const LINE_REPLY_MAX = 5;
 const TRUNCATE_NOTICE =
-  process.env.LINE_TRUNCATE_NOTICE ||
   "（訊息過長，部分內容已省略。如需完整內容請輸入更精準的關鍵字。）";
 
-// ======== 安全分段（智能切句）========
+// ===== 智慧分段 =====
 function smartSplitText(text, maxLen = LINE_SAFE_LEN) {
   if (!text) return [];
   const output = [];
   let remaining = text.trim();
 
-  const sentenceEnd = /([。！？\n]|$)/;
   while (remaining.length > 0) {
     if (remaining.length <= maxLen) {
       output.push(remaining);
@@ -38,7 +36,6 @@ function smartSplitText(text, maxLen = LINE_SAFE_LEN) {
     }
 
     let slice = remaining.slice(0, maxLen);
-    // 嘗試往前找自然分割點
     const lastSplit = Math.max(
       slice.lastIndexOf("。"),
       slice.lastIndexOf("！"),
@@ -50,11 +47,9 @@ function smartSplitText(text, maxLen = LINE_SAFE_LEN) {
     );
 
     if (lastSplit > 0 && lastSplit > maxLen * 0.6) {
-      // 在句子邊界切
       output.push(slice.slice(0, lastSplit + 1).trim());
       remaining = remaining.slice(lastSplit + 1).trim();
     } else {
-      // 沒找到合適邊界，就硬切
       output.push(slice.trim());
       remaining = remaining.slice(maxLen).trim();
     }
@@ -72,42 +67,37 @@ async function replySmart({ replyToken, text }) {
   await client.replyMessage(replyToken, messages);
 }
 
-// ======== 簽章驗證 ========
+// ===== 讀取 raw body & 簽章驗證 =====
 async function readRawBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
-    req.on("data", chunk => chunks.push(chunk));
+    req.on("data", c => chunks.push(c));
     req.on("end", () => resolve(Buffer.concat(chunks)));
     req.on("error", reject);
   });
 }
 function verifyLineSignature(rawBody, signature) {
-  const hmac = crypto.createHmac("sha256", LINE_CHANNEL_SECRET);
+  const secret = process.env.LINE_CHANNEL_SECRET || "";
+  const hmac = crypto.createHmac("sha256", secret);
   hmac.update(rawBody);
   const expected = hmac.digest("base64");
   return signature === expected;
 }
-function isLineVerifyTestEvent(events = []) {
-  const testTokens = new Set([
-    "00000000000000000000000000000000",
-    "ffffffffffffffffffffffffffffffff"
-  ]);
-  return events.some(ev => testTokens.has(ev?.replyToken));
-}
 
-// ======== GPT 直接回覆 ========
-async function askGPT({ text }) {
-  const system = [
-    "你是專業的中文客服助理，請以繁體中文回答，語氣親切自然。",
-    "回答要具體、有條理，不生成圖片或影音內容。"
+// ===== 呼叫 GPT（僅用於廠商問題延伸說明） =====
+async function askGPTwithContext({ question, context }) {
+  const prompt = [
+    "你是一位中文導覽員，請根據以下提供的資料（僅限內容內資訊）進行說明或回答問題。",
+    "請不要虛構資訊，也不要引用資料外的內容。",
+    "保持自然口吻，以繁體中文回答。"
   ].join("\n");
 
   const body = {
     model: OPENAI_COMPLETION_MODEL,
-    temperature: 0.3,
+    temperature: 0.4,
     messages: [
-      { role: "system", content: system },
-      { role: "user", content: text }
+      { role: "system", content: prompt },
+      { role: "user", content: `使用者問題：${question}\n\n相關資料：${context}` }
     ]
   };
 
@@ -120,15 +110,35 @@ async function askGPT({ text }) {
       },
       body: JSON.stringify(body)
     });
-
     const json = await res.json();
     return json?.choices?.[0]?.message?.content?.trim() || "（無回覆）";
-  } catch {
-    return "抱歉，目前系統有點忙碌，請稍後再試。";
+  } catch (err) {
+    return "抱歉，目前暫時無法查詢該品牌的資訊。";
   }
 }
 
-// ======== 主處理函式 ========
+// ===== 判斷是否為廠商問題 =====
+function isVendorQuestion(text) {
+  const vendorKeywords = [
+    "彼緹娃",
+    "國王家族",
+    "Kings Family",
+    "上雅禮品",
+    "智匠工藝社",
+    "Les OMBRES",
+    "八木茶飲",
+    "巷隅咖啡",
+    "日寶食品",
+    "佛都愛玉",
+    "御品紅豆",
+    "鯤島",
+    "Khuntor",
+    "章成麥芽餅"
+  ];
+  return vendorKeywords.some(k => text.includes(k) || text.includes("廠商") || text.includes("品牌"));
+}
+
+// ===== 主處理邏輯 =====
 export default async function handler(req, res) {
   const rawBody = await readRawBody(req);
   const signature = req.headers["x-line-signature"];
@@ -136,9 +146,8 @@ export default async function handler(req, res) {
     return res.status(401).send("Invalid signature");
   }
 
-  const body = JSON.parse(rawBody.toString("utf8") || "{}");
+  const body = JSON.parse(rawBody.toString("utf-8") || "{}");
   const events = body?.events || [];
-  if (isLineVerifyTestEvent(events)) return res.status(200).end();
 
   for (const ev of events) {
     if (ev?.type !== "message" || ev?.message?.type !== "text") continue;
@@ -146,43 +155,44 @@ export default async function handler(req, res) {
     const replyToken = ev.replyToken;
 
     try {
-      // 若是媒體生成需求
-      if (isMediaGenerationRequest({ text, event: ev })) {
-        await client.replyMessage(replyToken, [
-          { type: "text", text: "目前暫不提供圖片、影片、音檔生成服務。" }
-        ]);
-        continue;
-      }
-
-      // 商品資料庫比對
-      const productMatches = matchProducts(text, { limit: 8, minScore: 0.35 });
-      if (productMatches.length > 0) {
-        const answer = formatProductAnswer(productMatches, text);
-        await replySmart({ replyToken, text: answer });
-        continue;
-      }
-
-      // FAQ 命中 → 經 GPT 潤飾
+      // 一般 FAQ 查詢
       const faqAns = matchFAQ(text, { minScore: 0.45 });
-      if (faqAns) {
-        let finalText = faqAns;
-        try {
-          const refined = await refineWithPersona({
-            question: text,
-            rawAnswer: faqAns
-          });
-          if (refined) finalText = refined;
-        } catch {}
-        await replySmart({ replyToken, text: finalText });
-        continue;
-      }
 
-      // 一般 GPT 回覆
-      const gpt = await askGPT({ text });
-      await replySmart({ replyToken, text: gpt });
-    } catch (e) {
+      if (isVendorQuestion(text)) {
+        // 廠商相關問題
+        if (faqAns) {
+          // FAQ 命中 → 直接回覆
+          await replySmart({ replyToken, text: faqAns });
+        } else {
+          // FAQ 未命中 → 從 FAQ 內找該品牌資料並交給 GPT
+          const related = findRelatedFAQContent(text);
+          if (related) {
+            const explain = await askGPTwithContext({
+              question: text,
+              context: related
+            });
+            await replySmart({ replyToken, text: explain });
+          } else {
+            await replySmart({
+              replyToken,
+              text: "抱歉，目前暫無該品牌的相關資料。"
+            });
+          }
+        }
+      } else {
+        // 一般問題 → 只回 FAQ，不用 GPT
+        if (faqAns) {
+          await replySmart({ replyToken, text: faqAns });
+        } else {
+          await replySmart({
+            replyToken,
+            text: "目前僅提供與觀光工廠、品牌成員相關的資訊。"
+          });
+        }
+      }
+    } catch (err) {
       await client.replyMessage(replyToken, [
-        { type: "text", text: "抱歉，系統暫時忙碌，請稍後再試。" }
+        { type: "text", text: "抱歉，系統忙碌，請稍後再試。" }
       ]);
     }
   }
