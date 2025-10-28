@@ -1,9 +1,10 @@
 // api/webhook.js
 import crypto from "crypto";
 import * as line from "@line/bot-sdk";
-import { isMediaGenerationRequest } from "../utils/policy.js";
-import { matchFAQ, findRelatedFAQContent } from "../utils/faq.js";
 import fetch from "node-fetch";
+
+import { isMediaGenerationRequest } from "../utils/policy.js";
+import { matchFAQ, findRelatedFAQContent, extractVendorMeta } from "../utils/faq.js";
 import { rememberLastQuestion, getLastQuestion } from "../utils/memory.js";
 
 // ===== LINE Client =====
@@ -12,7 +13,7 @@ const client = new line.Client({
   channelSecret: process.env.LINE_CHANNEL_SECRET
 });
 
-// ===== AI（僅用於品牌/廠商：FAQ 未命中 → 延伸說明） =====
+// ===== AI（僅用於品牌/廠商：FAQ 未命中 → 結構化詢問） =====
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_COMPLETION_MODEL = process.env.OPENAI_COMPLETION_MODEL || "gpt-4o";
 
@@ -21,7 +22,7 @@ const LINE_SAFE_LEN = Number(process.env.LINE_SAFE_LEN || 1800);
 const LINE_REPLY_MAX = Number(process.env.LINE_REPLY_MAX || 5);
 const TRUNCATE_NOTICE =
   process.env.LINE_TRUNCATE_NOTICE ||
-  "（訊息過長，部分內容已省略。如需完整內容請輸入更精準的關鍵字。）";
+  "（訊息過長，部分內容已省略。如需完整內容請以現場或官網資訊為準。）";
 
 function smartSplitText(text, maxLen = LINE_SAFE_LEN) {
   if (!text) return [];
@@ -87,7 +88,7 @@ function isLineVerifyTestEvent(events = []) {
   return events.some(ev => t.has(ev?.replyToken));
 }
 
-// ===== 品牌/廠商關鍵字表 & 抽取工具 =====
+// ===== 品牌/廠商關鍵字 & 辨識 =====
 const VENDOR_KEYWORDS = [
   "彼緹娃",
   "國王家族",
@@ -104,7 +105,9 @@ const VENDOR_KEYWORDS = [
   "御品紅豆",
   "鯤島",
   "Khuntor",
-  "章成麥芽餅"
+  "章成麥芽餅",
+  "廠商",
+  "品牌"
 ];
 
 function extractVendorKeyword(text) {
@@ -113,34 +116,37 @@ function extractVendorKeyword(text) {
   for (const k of VENDOR_KEYWORDS) {
     if (s.includes(String(k).toLowerCase())) return k;
   }
-  // 泛用詞也算品牌詢問（需搭配上一題品牌補全）
-  if (/(品牌|廠商)/.test(text)) return "__GENERIC_VENDOR__";
   return null;
 }
 
-// ===== GPT：僅用提供的 context 延伸說明（不臆測）=====
-async function askGPTwithContext({ question, context, lastQuestion }) {
-  const system = [
-    "你是一位中文導覽員，僅能根據『以下提供的資料內容』回答，嚴禁臆測或引用資料外的資訊。",
-    "請以繁體中文，條列清楚、語氣親切自然。"
+// ===== 僅用於「FAQ 未命中」的品牌延伸：結構化 Prompt =====
+async function askGPT_vendorStructured({ vendor, address, question, context, urls, lastQuestion }) {
+  const sys = [
+    "你是資料綜整助理。請僅根據提供的資料與一般常識進行說明；不可臆測或虛構細節。",
+    "若內容包含非直接來自提供資料的延伸推斷或常識，請以【不同來源】標註該句子。",
+    "結尾務必加入：『※實際資訊以現場或官網公告為準。』",
+    "用繁體中文、條列清楚、避免冗語。"
   ].join("\n");
 
   const user = [
-    `使用者本次問題：${question}`,
-    lastQuestion ? `使用者上一題：${lastQuestion}` : "",
+    `廠商：${vendor || "未知"}`,
+    `地點：${address || "未知"}`,
+    `問題：${question}`,
+    `備註：請輸出問題詳細並且具完整內容與訊息；若詢問為「價格」，請說明常見價位範圍與影響因素（如杯/份/大小/配料），並指引至現場或官網查詢最新價格。`,
     "",
-    "以下是可用資料（只允許引用這些內容）：",
-    context
+    "可用資料（FAQ 摘要，不可超出此範圍斷言）：",
+    context || "（無）",
+    urls && urls.length ? `\n可能參考網址：\n- ${urls.join("\n- ")}` : ""
   ].join("\n");
 
   const body = {
     model: OPENAI_COMPLETION_MODEL,
     temperature: 0.4,
     messages: [
-      { role: "system", content: system },
+      { role: "system", content: sys },
       { role: "user", content: user }
     ]
-    // 不設定 max_tokens：交給 gpt-4o 自行輸出完整內容
+    // 不加 max_tokens → 讓 gpt-4o 自行輸出完整內容
   };
 
   try {
@@ -178,7 +184,7 @@ export default async function handler(req, res) {
     const userId = ev?.source?.userId || "";
 
     try {
-      // 禁止影像/音視頻生成
+      // 媒體生成類直接擋掉
       if (isMediaGenerationRequest({ text, event: ev })) {
         await client.replyMessage(replyToken, [
           { type: "text", text: "目前僅提供觀光工廠與品牌成員的文字資訊服務。" }
@@ -188,45 +194,34 @@ export default async function handler(req, res) {
 
       // 先做 FAQ 嘗試（一般問題只回 FAQ）
       const faqAnsDirect = matchFAQ(text, { minScore: 0.45 });
-      // 取上一題，做品牌承接
+
+      // 取上一題以承接品牌
       const lastQ = getLastQuestion(userId);
+      let vendor = extractVendorKeyword(text) || extractVendorKeyword(lastQ || "");
 
-      // 解析品牌關鍵字：先看當前，再看上一題
-      let vendorKey = extractVendorKeyword(text);
-      if (!vendorKey && lastQ) vendorKey = extractVendorKeyword(lastQ);
-      if (vendorKey === "__GENERIC_VENDOR__") {
-        // 本句只說了「廠商/品牌」，嘗試從上一題補具體品牌
-        const inferred = lastQ ? extractVendorKeyword(lastQ) : null;
-        vendorKey = inferred && inferred !== "__GENERIC_VENDOR__" ? inferred : null;
-      }
-
-      if (vendorKey) {
-        // ——【廠商/品牌問題】——
-        // 先試 FAQ（把品牌+當前問題一起丟，提高命中率）
-        const qForFAQ = vendorKey ? `${vendorKey} ${text}` : text;
+      if (vendor) {
+        // ——【品牌 / 廠商分支】——
+        // 提升 FAQ 命中率（把品牌 + 當前問題一起丟）
+        const qForFAQ = vendor && !text.includes(vendor) ? `${vendor} ${text}` : text;
         const faqAns = matchFAQ(qForFAQ, { minScore: 0.45 }) || faqAnsDirect;
 
         if (faqAns) {
           await replySmart({ replyToken, text: faqAns });
         } else {
-          // FAQ 未命中 → 在 FAQ 中收集該品牌相關內容（context）
-          const context = findRelatedFAQContent(vendorKey);
-          if (context) {
-            const explain = await askGPTwithContext({
-              question: qForFAQ,
-              context,
-              lastQuestion: lastQ || null
-            });
-            await replySmart({ replyToken, text: explain });
-          } else {
-            await replySmart({
-              replyToken,
-              text: "抱歉，目前暫無該品牌的相關資料。"
-            });
-          }
+          // FAQ 未命中 → 在 FAQ 內萃取品牌脈絡 + 結構化 Prompt 查 GPT
+          const meta = extractVendorMeta(vendor);
+          const answer = await askGPT_vendorStructured({
+            vendor,
+            address: meta.address,
+            question: text,
+            context: meta.context,
+            urls: meta.urls,
+            lastQuestion: lastQ || null
+          });
+          await replySmart({ replyToken, text: answer });
         }
       } else {
-        // ——【一般問題】——
+        // ——【一般問題分支】——
         if (faqAnsDirect) {
           await replySmart({ replyToken, text: faqAnsDirect });
         } else {
@@ -237,8 +232,7 @@ export default async function handler(req, res) {
         }
       }
 
-      // 記住「上一題」（無資料庫、同一實例 warm 期間有效）
-      rememberLastQuestion(userId, text);
+      rememberLastQuestion(userId, text); // 記住上一題（無 DB、warm 期間有效）
     } catch (e) {
       await client.replyMessage(replyToken, [
         { type: "text", text: "抱歉，系統忙碌，請稍後再試。" }

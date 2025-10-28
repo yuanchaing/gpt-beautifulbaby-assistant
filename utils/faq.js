@@ -1,138 +1,83 @@
 // utils/faq.js
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
+import fs from "fs";
+import path from "path";
+import stringSimilarity from "string-similarity";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const faqPath = path.join(__dirname, '..', 'storage', 'faq.json');
-
-// ---- 讀取 FAQ ----
+const faqPath = path.join(process.cwd(), "storage", "faq.json");
 let FAQ_LIST = [];
 try {
-  const raw = fs.readFileSync(faqPath, 'utf-8');
-  const arr = JSON.parse(raw);
-  FAQ_LIST = Array.isArray(arr) ? arr : [];
-} catch (e) {
-  console.warn('[FAQ] Load failed:', e?.message || e);
+  FAQ_LIST = JSON.parse(fs.readFileSync(faqPath, "utf8"));
+} catch {
+  FAQ_LIST = [];
 }
 
-// 可手動重新載入（熱更新）
-export function reloadFAQ() {
-  try {
-    const raw = fs.readFileSync(faqPath, 'utf-8');
-    const arr = JSON.parse(raw);
-    FAQ_LIST = Array.isArray(arr) ? arr : [];
-    return true;
-  } catch (e) {
-    console.warn('[FAQ] Reload failed:', e?.message || e);
-    return false;
-  }
+/** 以相似度匹配 FAQ，回傳答案字串 */
+export function matchFAQ(input, { minScore = 0.45 } = {}) {
+  if (!Array.isArray(FAQ_LIST) || FAQ_LIST.length === 0) return null;
+  const questions = FAQ_LIST.map(q => q.question || q.q).filter(Boolean);
+  const matches = stringSimilarity.findBestMatch(input, questions);
+  const best = matches.bestMatch;
+  if (!best || best.rating < minScore) return null;
+  const item = FAQ_LIST.find(i => (i.question || i.q) === best.target);
+  return item?.answer || item?.a || null;
 }
 
-// ---- 規則：正規化 & 相似度 ----
-const STOP_PREFIXES = [
-  '請問', '想請問', '你們', '請', '麻煩', '是否', '想詢問', '想了解', '能否', '可以', '可否'
-];
-
-export function normalize(s = '') {
-  let t = String(s).toLowerCase();
-
-  // 去空白
-  t = t.replace(/\s+/g, '');
-
-  // 移除常見全形/半形標點
-  t = t.replace(/[＂＃＄％＆＇（）＊＋，－．／：；＜＝＞？＠［＼］］＾＿｀`｛｜｝～《》「」『』【】（）—\-\.,:;!?！？、。·•‧‥…]/g, '');
-
-  // 去掉常見開場語（前綴）
-  for (const p of STOP_PREFIXES) {
-    const np = p.toLowerCase();
-    if (t.startsWith(np)) {
-      t = t.slice(np.length);
-      break;
-    }
-  }
-
-  return t.trim();
-}
-
-// 字元集合 Jaccard 相似度
-function jaccard(a, b) {
-  if (!a || !b) return 0;
-  const A = new Set(a.split(''));
-  const B = new Set(b.split(''));
-  let inter = 0;
-  for (const ch of A) if (B.has(ch)) inter++;
-  const uni = A.size + B.size - inter;
-  return uni > 0 ? inter / uni : 0;
-}
-
-// 對單一 key 與輸入求分數
-function scoreKey(nInput, nKey) {
-  if (!nInput || !nKey) return 0;
-  if (nInput === nKey) return 1.0;
-  if (nInput.includes(nKey) || nKey.includes(nInput)) return 0.98; // 雙向包含
-  // 備援：Jaccard（越短字串容錯越要寬）
-  return jaccard(nInput, nKey);
-}
-
-// ---- 尋找最佳 FAQ ----
-// options.minScore：最低通過門檻（預設 0.45）
-// 回傳：{ item, score } 或 null
-export function findFAQ(input, options = {}) {
-  const text = (input ?? '').toString();
-  const norm = normalize(text);
-  if (!norm) return null;
-
-  const minScore = typeof options.minScore === 'number' ? options.minScore : 0.45;
-
-  let best = null;
-  for (const item of FAQ_LIST) {
-    const qs = Array.isArray(item?.q) ? item.q : [];
-    let localBest = 0;
-
-    for (const q of qs) {
-      const s = scoreKey(norm, normalize(q));
-      if (s > localBest) localBest = s;
-      if (localBest >= 0.98) break; // 早停：雙向包含/幾乎相同
-    }
-
-    if (localBest >= minScore) {
-      if (!best || localBest > best.score) {
-        best = { item, score: localBest };
-        if (best.score >= 0.98) break; // 早停：已經非常高
-      }
-    }
-  }
-
-  return best;
-}
-
-// ---- 對外提供簡易 API：直接拿答案 ----
-export function matchFAQ(input, options = {}) {
-  const found = findFAQ(input, options);
-  return found?.item?.a || null;
-}
-
-
-// 用於廠商延伸查詢：在 FAQ 裡搜尋該品牌關鍵字的所有答案內容
+/** 在 FAQ 全文中以包含關鍵字的方式搜尋「相關內容」，回傳合併字串 */
 export function findRelatedFAQContent(keyword) {
   if (!Array.isArray(FAQ_LIST) || FAQ_LIST.length === 0) return null;
   if (!keyword) return null;
+  const lower = String(keyword).toLowerCase();
 
-  const lower = keyword.toLowerCase();
   const related = FAQ_LIST
     .filter(item => {
-      const qs = Array.isArray(item?.q) ? item.q.join(' ') : '';
-      const a = item?.a || '';
-      const text = `${qs} ${a}`.toLowerCase();
-      return text.includes(lower);
+      const q = (item.question || item.q || "").toString();
+      const a = (item.answer || item.a || "").toString();
+      return (q + " " + a).toLowerCase().includes(lower);
     })
     .map(item => {
-      const title = Array.isArray(item?.q) ? item.q[0] : item?.q;
-      return `【${title}】\n${item.a}`;
+      const title = (item.question || item.q || "").toString();
+      const ans = (item.answer || item.a || "").toString();
+      return `【${title}】\n${ans}`;
     })
-    .join('\n\n');
+    .join("\n\n");
 
   return related || null;
 }
 
+/** 從某段文字中「盡力」萃取常見欄位：地址 / 電話 / 網址清單 */
+function extractMetaFromText(text) {
+  const meta = { address: null, phone: null, urls: [] };
+  if (!text) return meta;
+
+  // 地址（包含「地址：」「📍」等）
+  const addrMatch =
+    text.match(/(?:地址[:：]\s*|📍\s*)([^\n\r]+)/) ||
+    text.match(/台(?:北|中|南)|桃園|新(?:北|竹)|高雄|基隆|嘉義|彰化|雲林|南投|屏東|宜蘭|花蓮|台東|澎湖|金門|馬祖/);
+  if (addrMatch) meta.address = addrMatch[1] || addrMatch[0];
+
+  // 電話
+  const phoneMatch = text.match(/(?:電話[:：]\s*|\(?0\d{1,2}\)?[-\s]?)\d{3,4}[-\s]?\d{3,4}/);
+  if (phoneMatch) meta.phone = phoneMatch[0].replace(/^電話[:：]\s*/, "");
+
+  // 網址（全部撈出）
+  const urlRegex = /(https?:\/\/[^\s)]+)(?![^]*\1)/g;
+  const urls = new Set();
+  let m;
+  while ((m = urlRegex.exec(text)) !== null) {
+    urls.add(m[1]);
+  }
+  meta.urls = Array.from(urls);
+  return meta;
+}
+
+/** 從 FAQ 內找出第一段「最像這個品牌」的內容，並萃取地址/電話/網址 */
+export function extractVendorMeta(vendorKeyword) {
+  const ctx = findRelatedFAQContent(vendorKeyword) || "";
+  const meta = extractMetaFromText(ctx);
+  return {
+    context: ctx || null,
+    address: meta.address || null,
+    phone: meta.phone || null,
+    urls: meta.urls || []
+  };
+}
