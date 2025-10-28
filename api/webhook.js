@@ -3,9 +3,7 @@ import crypto from "crypto";
 import * as line from "@line/bot-sdk";
 import { isMediaGenerationRequest } from "../utils/policy.js";
 import { matchFAQ, findRelatedFAQContent } from "../utils/faq.js";
-import { refineWithPersona } from "../services/faq-refiner.js"; // 保留，如你要先潤飾 FAQ 可用
 import fetch from "node-fetch";
-import { matchProducts, formatProductAnswer } from "../utils/products.js";
 import { rememberLastQuestion, getLastQuestion } from "../utils/memory.js";
 
 // ===== LINE Client =====
@@ -14,18 +12,17 @@ const client = new line.Client({
   channelSecret: process.env.LINE_CHANNEL_SECRET
 });
 
-// ===== AI 設定（僅用於「廠商問題 FAQ 未命中」） =====
+// ===== AI（僅用於品牌/廠商：FAQ 未命中 → 延伸說明） =====
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_COMPLETION_MODEL = process.env.OPENAI_COMPLETION_MODEL || "gpt-4o";
 
-// ===== 分段設定 =====
+// ===== 分段設定（智慧切句） =====
 const LINE_SAFE_LEN = Number(process.env.LINE_SAFE_LEN || 1800);
 const LINE_REPLY_MAX = Number(process.env.LINE_REPLY_MAX || 5);
 const TRUNCATE_NOTICE =
   process.env.LINE_TRUNCATE_NOTICE ||
   "（訊息過長，部分內容已省略。如需完整內容請輸入更精準的關鍵字。）";
 
-// ===== 智慧分段（句號、頓號、換行優先）=====
 function smartSplitText(text, maxLen = LINE_SAFE_LEN) {
   if (!text) return [];
   const out = [];
@@ -90,37 +87,42 @@ function isLineVerifyTestEvent(events = []) {
   return events.some(ev => t.has(ev?.replyToken));
 }
 
-// ===== 判斷是否為「廠商／品牌」問題 =====
-function isVendorQuestion(text) {
-  const vendorKeywords = [
-    "彼緹娃",
-    "國王家族",
-    "Kings Family",
-    "上雅禮品",
-    "智匠工藝社",
-    "Les OMBRES",
-    "Les OMBRES d’Ambre",
-    "八木茶飲",
-    "巷隅咖啡",
-    "Lane Corner Café",
-    "日寶食品",
-    "佛都愛玉",
-    "御品紅豆",
-    "鯤島",
-    "Khuntor",
-    "章成麥芽餅",
-    "廠商",
-    "品牌"
-  ];
-  const lc = text.toLowerCase();
-  return vendorKeywords.some(k => lc.includes(String(k).toLowerCase()));
+// ===== 品牌/廠商關鍵字表 & 抽取工具 =====
+const VENDOR_KEYWORDS = [
+  "彼緹娃",
+  "國王家族",
+  "Kings Family",
+  "上雅禮品",
+  "智匠工藝社",
+  "Les OMBRES",
+  "Les OMBRES d’Ambre",
+  "八木茶飲",
+  "巷隅咖啡",
+  "Lane Corner Café",
+  "日寶食品",
+  "佛都愛玉",
+  "御品紅豆",
+  "鯤島",
+  "Khuntor",
+  "章成麥芽餅"
+];
+
+function extractVendorKeyword(text) {
+  if (!text) return null;
+  const s = String(text).toLowerCase();
+  for (const k of VENDOR_KEYWORDS) {
+    if (s.includes(String(k).toLowerCase())) return k;
+  }
+  // 泛用詞也算品牌詢問（需搭配上一題品牌補全）
+  if (/(品牌|廠商)/.test(text)) return "__GENERIC_VENDOR__";
+  return null;
 }
 
-// ===== 只在「廠商問題 FAQ 未命中」時，帶著 FAQ 摘要 + 上一題，交給 GPT 延伸 =====
+// ===== GPT：僅用提供的 context 延伸說明（不臆測）=====
 async function askGPTwithContext({ question, context, lastQuestion }) {
   const system = [
-    "你是一位中文導覽員，僅能根據『提供的資料內容』回答，禁止臆測或擴寫資料外的資訊。",
-    "請以繁體中文，段落清楚、語氣親切自然。"
+    "你是一位中文導覽員，僅能根據『以下提供的資料內容』回答，嚴禁臆測或引用資料外的資訊。",
+    "請以繁體中文，條列清楚、語氣親切自然。"
   ].join("\n");
 
   const user = [
@@ -138,7 +140,7 @@ async function askGPTwithContext({ question, context, lastQuestion }) {
       { role: "system", content: system },
       { role: "user", content: user }
     ]
-    // 不設定 max_tokens：讓 gpt-4o 自行輸出完整內容
+    // 不設定 max_tokens：交給 gpt-4o 自行輸出完整內容
   };
 
   try {
@@ -173,10 +175,10 @@ export default async function handler(req, res) {
     if (ev?.type !== "message" || ev?.message?.type !== "text") continue;
     const text = (ev.message.text || "").trim();
     const replyToken = ev.replyToken;
-    const userId = ev?.source?.userId || ""; // 用來記憶上一題
+    const userId = ev?.source?.userId || "";
 
     try {
-      // （可選）擋掉影像生成等請求
+      // 禁止影像/音視頻生成
       if (isMediaGenerationRequest({ text, event: ev })) {
         await client.replyMessage(replyToken, [
           { type: "text", text: "目前僅提供觀光工廠與品牌成員的文字資訊服務。" }
@@ -184,30 +186,35 @@ export default async function handler(req, res) {
         continue;
       }
 
-      // —— 商品：若你仍想保留（可視專案需求保留或移除）
-      const productMatches = matchProducts(text, { limit: 8, minScore: 0.35 });
-      if (productMatches.length > 0) {
-        const answer = formatProductAnswer(productMatches, text);
-        await replySmart({ replyToken, text: answer });
-        rememberLastQuestion(userId, text);
-        continue;
+      // 先做 FAQ 嘗試（一般問題只回 FAQ）
+      const faqAnsDirect = matchFAQ(text, { minScore: 0.45 });
+      // 取上一題，做品牌承接
+      const lastQ = getLastQuestion(userId);
+
+      // 解析品牌關鍵字：先看當前，再看上一題
+      let vendorKey = extractVendorKeyword(text);
+      if (!vendorKey && lastQ) vendorKey = extractVendorKeyword(lastQ);
+      if (vendorKey === "__GENERIC_VENDOR__") {
+        // 本句只說了「廠商/品牌」，嘗試從上一題補具體品牌
+        const inferred = lastQ ? extractVendorKeyword(lastQ) : null;
+        vendorKey = inferred && inferred !== "__GENERIC_VENDOR__" ? inferred : null;
       }
 
-      // —— FAQ 基本命中
-      const faqAns = matchFAQ(text, { minScore: 0.45 });
+      if (vendorKey) {
+        // ——【廠商/品牌問題】——
+        // 先試 FAQ（把品牌+當前問題一起丟，提高命中率）
+        const qForFAQ = vendorKey ? `${vendorKey} ${text}` : text;
+        const faqAns = matchFAQ(qForFAQ, { minScore: 0.45 }) || faqAnsDirect;
 
-      if (isVendorQuestion(text)) {
-        // 廠商 / 品牌問題
         if (faqAns) {
           await replySmart({ replyToken, text: faqAns });
         } else {
-          // FAQ 未命中 → 在 FAQ 內找該品牌的相關內容，再交 GPT 延伸
-          const related = findRelatedFAQContent(text);
-          if (related) {
-            const lastQ = getLastQuestion(userId);
+          // FAQ 未命中 → 在 FAQ 中收集該品牌相關內容（context）
+          const context = findRelatedFAQContent(vendorKey);
+          if (context) {
             const explain = await askGPTwithContext({
-              question: text,
-              context: related,
+              question: qForFAQ,
+              context,
               lastQuestion: lastQ || null
             });
             await replySmart({ replyToken, text: explain });
@@ -219,9 +226,9 @@ export default async function handler(req, res) {
           }
         }
       } else {
-        // 一般問題：只從 FAQ 找，不用 GPT
-        if (faqAns) {
-          await replySmart({ replyToken, text: faqAns });
+        // ——【一般問題】——
+        if (faqAnsDirect) {
+          await replySmart({ replyToken, text: faqAnsDirect });
         } else {
           await replySmart({
             replyToken,
@@ -230,7 +237,7 @@ export default async function handler(req, res) {
         }
       }
 
-      // 最後把本次問題記起來（無資料庫，只在 warm instance 生效）
+      // 記住「上一題」（無資料庫、同一實例 warm 期間有效）
       rememberLastQuestion(userId, text);
     } catch (e) {
       await client.replyMessage(replyToken, [
