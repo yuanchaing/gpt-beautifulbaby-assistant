@@ -1,9 +1,6 @@
 // utils/memory.js
-// 超輕量「上一題」暫存（無資料庫）
-// 注意：Serverless 只能在同一實例的 warm 階段保留記憶，不保證持久。
-
+// 超輕量「上一題」暫存（無資料庫）。注意：Serverless 僅在同一實例的 warm 期間有效。
 const store = new Map(); // key: userId, value: { text, expireAt }
-
 const DEFAULT_TTL_MS = Number(process.env.LAST_Q_TTL_MS || 10 * 60 * 1000); // 10 分鐘
 
 export function rememberLastQuestion(userId, text, ttlMs = DEFAULT_TTL_MS) {
@@ -23,7 +20,6 @@ export function getLastQuestion(userId) {
   return rec.text;
 }
 
-// 可選：手動清除
 export function clearLastQuestion(userId) {
   if (!userId) return;
   store.delete(userId);
