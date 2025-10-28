@@ -1,83 +1,63 @@
 // services/faq-refiner.js
-import { chatCompletions } from './openai-client.js';
+import fetch from "node-fetch";
 
-const {
-  APP_LANG = 'zh_TW',
-  APP_INIT_PROMPT = '',
-  HUMAN_NAME = '',
-  HUMAN_INIT_PROMPT = '',
-  BOT_NAME = 'AI',
-  BOT_INIT_PROMPT = '',
-  BOT_TONE = '',
-  FAQ_REFINED_MAXLEN, // 允許空
-} = process.env;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
+const OPENAI_COMPLETION_MODEL = process.env.OPENAI_COMPLETION_MODEL || "gpt-4o";
 
 /**
- * 以人設優化 FAQ 回覆，保持事實不變、不臆測。
- * @param {object} payload
- * @param {string} payload.question 原始問題（可無）
- * @param {string} payload.rawAnswer FAQ 原始答案（必填）
- * @param {number} [payload.maxLen] 覆寫最大字數；<=0 或未填表示不限制
- * @returns {Promise<string>}
+ * 使用 GPT 對 FAQ 原始回答進行人設潤飾（無任何字數限制）
+ * @param {object} options
+ * @param {string} options.question 使用者問題
+ * @param {string} options.rawAnswer FAQ 原始回答內容
+ * @returns {Promise<string>} 潤飾後的文字
  */
-export async function refineWithPersona({ question = '', rawAnswer, maxLen }) {
-  if (!rawAnswer) return '';
+export async function refineWithPersona({ question, rawAnswer }) {
+  if (!OPENAI_API_KEY) return rawAnswer;
 
-  // 最終限制值：優先使用參數，其次使用環境變數；<=0 或 NaN → 視為不限制
-  const envLen = Number(FAQ_REFINED_MAXLEN);
-  const mergedLen = (typeof maxLen === 'number') ? maxLen : envLen;
-  const unlimited = !mergedLen || Number.isNaN(mergedLen) || mergedLen <= 0;
+  const systemPrompt = [
+    "你是一位友善、專業的中文客服助理，負責將 FAQ 原始回答潤飾成自然、有條理、親切的文字。",
+    "請保持所有內容完整，不可刪減任何資訊，也不可省略品牌或細節。",
+    "若內容包含多個品牌或條列項，請使用清晰的段落與標題符號（如 emoji、項目符號）呈現。",
+    "請以繁體中文回答，不使用英文標點，不添加多餘結尾詞。",
+  ].join("\n");
 
-  const system = [
-    APP_INIT_PROMPT?.trim() || '',
-    `你現在的身份是「${BOT_NAME || 'AI'}」。語氣（Tone）：${BOT_TONE || '自然、專業、友善'}`,
-    '請嚴格避免捏造/臆測，不要加入 FAQ 未提供的新事實。',
-  ].filter(Boolean).join('\n');
+  const userPrompt = [
+    `使用者問題：${question}`,
+    "",
+    "以下是 FAQ 原始內容，請保持資訊完整但優化排版與語氣：",
+    "",
+    rawAnswer
+  ].join("\n");
 
-  const humanKickoff = (HUMAN_INIT_PROMPT || '').trim();
-  const botKickoff = (BOT_INIT_PROMPT || '').trim();
+  const body = {
+    model: OPENAI_COMPLETION_MODEL,
+    temperature: 0.4, // 自然但不跑題
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt }
+    ]
+    // ❌ 不加 max_tokens：讓 gpt-4o 自行生成完整內容（支援 128k）
+  };
 
-  const langHint = (() => {
-    switch (APP_LANG) {
-      case 'zh_TW': return '請使用繁體中文回覆。';
-      case 'zh_CN': return '请使用简体中文回复。';
-      case 'en':   return 'Reply in natural English.';
-      case 'ja':   return '日本語で回答してください。';
-      default:     return 'Reply in the user locale.';
+  try {
+    const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    });
+
+    if (!resp.ok) {
+      const msg = await resp.text().catch(() => "");
+      throw new Error(`OpenAI API error ${resp.status} ${msg}`);
     }
-  })();
 
-  const rules = [
-    '請依人設優化下列 FAQ 回覆內容，但必須保持事實與原意不變：',
-    '— 可重寫句子使更友善、具體、好讀。',
-    '— 可加入簡短的步驟化條列，但不要新增未提供的新事實。',
-  ];
-
-  // 只有在有限制時才加入長度提示
-  if (!unlimited) {
-    rules.push(`— 最多 ${mergedLen} 字；必要時可用項目符號。`);
-  } else {
-    // 不限制：可鼓勵充分敘述，但仍保持重點清楚
-    rules.push('— 盡量完整詳盡，條理清晰；必要時使用條列與小標。');
+    const data = await resp.json();
+    return data?.choices?.[0]?.message?.content?.trim() || rawAnswer;
+  } catch (err) {
+    console.error("❌ refineWithPersona error:", err.message);
+    return rawAnswer;
   }
-
-  rules.push(langHint, '');
-
-  const instruction = [
-    ...rules,
-    question ? `【原始問題】\n${question}\n` : '',
-    `【原始答案】\n${rawAnswer}`,
-  ].join('\n');
-
-  const messages = [
-    { role: 'system', content: system },
-    ...(humanKickoff ? [{ role: 'user', content: humanKickoff }] : []),
-    ...(botKickoff ? [{ role: 'assistant', content: botKickoff }] : []),
-    { role: 'user', content: instruction },
-  ];
-
-  // 不限制字數 → 不帶 max_tokens；否則沿用預設
-  const options = unlimited ? { max_tokens: null } : {};
-  const refined = await chatCompletions(messages, options);
-  return (refined || '').trim();
 }

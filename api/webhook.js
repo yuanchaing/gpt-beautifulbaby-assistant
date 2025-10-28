@@ -1,234 +1,191 @@
 // api/webhook.js
-import crypto from 'crypto';
-import * as line from '@line/bot-sdk';
-import { isMediaGenerationRequest } from '../utils/policy.js';
-import { matchFAQ } from '../utils/faq.js';
-import { refineWithPersona } from '../services/faq-refiner.js';
-import fetch from 'node-fetch';
-import { matchProducts, formatProductAnswer } from '../utils/products.js';
+import crypto from "crypto";
+import * as line from "@line/bot-sdk";
+import { isMediaGenerationRequest } from "../utils/policy.js";
+import { matchFAQ } from "../utils/faq.js";
+import { refineWithPersona } from "../services/faq-refiner.js";
+import fetch from "node-fetch";
+import { matchProducts, formatProductAnswer } from "../utils/products.js";
 
-// ====== OpenAI 設定（環境變數）======
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
-const OPENAI_COMPLETION_MODEL = process.env.OPENAI_COMPLETION_MODEL || 'gpt-4o-mini';
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
+const OPENAI_COMPLETION_MODEL = process.env.OPENAI_COMPLETION_MODEL || "gpt-4o";
+const LINE_CHANNEL_ACCESS_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN;
+const LINE_CHANNEL_SECRET = process.env.LINE_CHANNEL_SECRET;
 
-// FAQ 優化輸出長度（<=0 代表不限長度）
-const FAQ_REFINED_MAXLEN = (process.env.FAQ_REFINED_MAXLEN === undefined)
-  ? 250
-  : Number(process.env.FAQ_REFINED_MAXLEN);
-
-// LINE 文字訊息安全長度（可用環境變數覆蓋）
-const LINE_MAX_CHARS = Number(process.env.LINE_MAX_CHARS || 1800);
-// 一次 reply 最多 5 則訊息（LINE 限制）
-const LINE_REPLY_MAX = Number(process.env.LINE_REPLY_MAX || 5);
-// 超過可回覆上限時是否加上截斷提示
-const LINE_TRUNCATE_NOTICE = process.env.LINE_TRUNCATE_NOTICE ?? '（訊息過長，已截斷。如需完整內容請輸入更精準的關鍵字。）';
-
-// LINE Bot 憑證
 const client = new line.Client({
-  channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
-  channelSecret: process.env.LINE_CHANNEL_SECRET,
+  channelAccessToken: LINE_CHANNEL_ACCESS_TOKEN,
+  channelSecret: LINE_CHANNEL_SECRET
 });
 
-// ====== 讀 raw body（用於簽章驗證）======
-async function readRawBody(req) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    req.on('data', (c) => chunks.push(c));
-    req.on('end', () => resolve(Buffer.concat(chunks)));
-    req.on('error', reject);
-  });
-}
+// ======== 分段設定 ========
+const LINE_REPLY_MAX = 5;
+const LINE_SAFE_LEN = Number(process.env.LINE_SAFE_LEN || 1800);
+const TRUNCATE_NOTICE =
+  process.env.LINE_TRUNCATE_NOTICE ||
+  "（訊息過長，部分內容已省略。如需完整內容請輸入更精準的關鍵字。）";
 
-// ====== LINE 簽章驗證 ======
-function verifyLineSignature(rawBody, signature) {
-  const secret = process.env.LINE_CHANNEL_SECRET || '';
-  const hmac = crypto.createHmac('sha256', secret);
-  hmac.update(rawBody);
-  const expected = hmac.digest('base64');
-  return signature === expected;
-}
+// ======== 安全分段（智能切句）========
+function smartSplitText(text, maxLen = LINE_SAFE_LEN) {
+  if (!text) return [];
+  const output = [];
+  let remaining = text.trim();
 
-// ====== LINE Verify 測試事件（replyToken 全 0 / 全 f）======
-function isLineVerifyTestEvent(events = []) {
-  const TEST_TOKENS = new Set([
-    '00000000000000000000000000000000',
-    'ffffffffffffffffffffffffffffffff',
-  ]);
-  return events.some((ev) => ev?.replyToken && TEST_TOKENS.has(ev.replyToken));
-}
-
-// ====== 長訊息切分（僅 reply，不做 push）======
-function splitLongText(text, max = LINE_MAX_CHARS) {
-  if (!text) return [''];
-  const chunks = [];
-  const paras = String(text).split(/\n{2,}/); // 優先以段落切
-  for (const para of paras) {
-    if (para.length <= max) {
-      chunks.push(para);
-      continue;
+  const sentenceEnd = /([。！？\n]|$)/;
+  while (remaining.length > 0) {
+    if (remaining.length <= maxLen) {
+      output.push(remaining);
+      break;
     }
-    // 段落仍超長 → 以單行切
-    const lines = para.split('\n');
-    let buf = '';
-    for (const ln of lines) {
-      const next = buf ? `${buf}\n${ln}` : ln;
-      if (next.length > max) {
-        if (buf) chunks.push(buf);
-        if (ln.length <= max) {
-          buf = ln;
-        } else {
-          // 單行仍超長 → 以字元硬切
-          for (let i = 0; i < ln.length; i += max) {
-            chunks.push(ln.slice(i, i + max));
-          }
-          buf = '';
-        }
-      } else {
-        buf = next;
-      }
+
+    let slice = remaining.slice(0, maxLen);
+    // 嘗試往前找自然分割點
+    const lastSplit = Math.max(
+      slice.lastIndexOf("。"),
+      slice.lastIndexOf("！"),
+      slice.lastIndexOf("？"),
+      slice.lastIndexOf("，"),
+      slice.lastIndexOf("、"),
+      slice.lastIndexOf("；"),
+      slice.lastIndexOf("\n")
+    );
+
+    if (lastSplit > 0 && lastSplit > maxLen * 0.6) {
+      // 在句子邊界切
+      output.push(slice.slice(0, lastSplit + 1).trim());
+      remaining = remaining.slice(lastSplit + 1).trim();
+    } else {
+      // 沒找到合適邊界，就硬切
+      output.push(slice.trim());
+      remaining = remaining.slice(maxLen).trim();
     }
-    if (buf) chunks.push(buf);
   }
-  return chunks;
+  return output;
 }
 
-async function replyOnlyLongText({ replyToken, text }) {
-  let parts = splitLongText(text);
-  // 只允許回覆最多 LINE_REPLY_MAX 則
-  if (parts.length > LINE_REPLY_MAX) {
-    // 將最後一則改為「截斷提示」
-    const head = parts.slice(0, LINE_REPLY_MAX - 1);
-    const last = parts[LINE_REPLY_MAX - 1] || '';
-    const tailNotice = (LINE_TRUNCATE_NOTICE && typeof LINE_TRUNCATE_NOTICE === 'string')
-      ? `\n\n${LINE_TRUNCATE_NOTICE}` : '';
-    parts = [...head, `${last}${tailNotice}`];
+async function replySmart({ replyToken, text }) {
+  const parts = smartSplitText(text);
+  let messages = parts.map(t => ({ type: "text", text: t }));
+  if (messages.length > LINE_REPLY_MAX) {
+    messages = messages.slice(0, LINE_REPLY_MAX - 1);
+    messages.push({ type: "text", text: TRUNCATE_NOTICE });
   }
-  const messages = parts.map(t => ({ type: 'text', text: t }));
   await client.replyMessage(replyToken, messages);
 }
 
-// ---- 一般 GPT 封裝（不使用上下文記憶）----
-async function askGPT({ text }) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), Number(process.env.OPENAI_TIMEOUT || 9000));
+// ======== 簽章驗證 ========
+async function readRawBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on("data", chunk => chunks.push(chunk));
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
+  });
+}
+function verifyLineSignature(rawBody, signature) {
+  const hmac = crypto.createHmac("sha256", LINE_CHANNEL_SECRET);
+  hmac.update(rawBody);
+  const expected = hmac.digest("base64");
+  return signature === expected;
+}
+function isLineVerifyTestEvent(events = []) {
+  const testTokens = new Set([
+    "00000000000000000000000000000000",
+    "ffffffffffffffffffffffffffffffff"
+  ]);
+  return events.some(ev => testTokens.has(ev?.replyToken));
+}
 
+// ======== GPT 直接回覆 ========
+async function askGPT({ text }) {
   const system = [
-    '你是專業的中文客服助理，回答需：',
-    '1) 口吻親切、簡潔、具體；',
-    '2) 優先以繁體中文；',
-    '3) 若問題與門市資訊、營業時間、活動、優惠相關、地點，給出清楚步驟或要點；',
-    '4) 不確定時，誠實說明並提出可行的下一步（如提供關鍵字或引導人工）；',
-    '5) 嚴禁生成圖片/影片/音檔，若使用者要求，請婉拒並提供可行的文字協助替代方案。',
-  ].join('\n');
+    "你是專業的中文客服助理，請以繁體中文回答，語氣親切自然。",
+    "回答要具體、有條理，不生成圖片或影音內容。"
+  ].join("\n");
 
   const body = {
     model: OPENAI_COMPLETION_MODEL,
-    messages: [
-      { role: 'system', content: system },
-      { role: 'user', content: text },
-    ],
     temperature: 0.3,
-    max_tokens: 700,
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: text }
+    ]
   };
 
   try {
-    const resp = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      signal: controller.signal,
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
       headers: {
-        'Authorization': `Bearer ${OPENAI_API_KEY}`,
-        'Content-Type': 'application/json',
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify(body)
     });
 
-    clearTimeout(timeout);
-
-    if (!resp.ok) {
-      const msg = await resp.text().catch(() => '');
-      throw new Error(`OpenAI error ${resp.status} ${msg}`);
-    }
-
-    const json = await resp.json();
-    return json?.choices?.[0]?.message?.content ?? '（無回覆）';
-  } catch (e) {
-    clearTimeout(timeout);
-    return '抱歉，我現在有點忙碌，請稍後再試或換個說法提問。';
+    const json = await res.json();
+    return json?.choices?.[0]?.message?.content?.trim() || "（無回覆）";
+  } catch {
+    return "抱歉，目前系統有點忙碌，請稍後再試。";
   }
 }
 
+// ======== 主處理函式 ========
 export default async function handler(req, res) {
-  // 1) 讀 raw body、做簽章驗證
   const rawBody = await readRawBody(req);
-  const signature = req.headers['x-line-signature'];
+  const signature = req.headers["x-line-signature"];
   if (!verifyLineSignature(rawBody, signature)) {
-    return res.status(401).send('Invalid signature');
+    return res.status(401).send("Invalid signature");
   }
 
-  // 2) 解析 events
-  const body = JSON.parse(rawBody.toString('utf-8') || '{}');
+  const body = JSON.parse(rawBody.toString("utf8") || "{}");
   const events = body?.events || [];
+  if (isLineVerifyTestEvent(events)) return res.status(200).end();
 
-  // 3) LINE Verify 測試：立刻 200
-  if (isLineVerifyTestEvent(events)) {
-    return res.status(200).end();
-  }
-
-  // 4) 逐則處理
   for (const ev of events) {
-    try {
-      if (ev?.type !== 'message' || ev?.message?.type !== 'text') continue;
-      const text = (ev.message.text || '').trim();
+    if (ev?.type !== "message" || ev?.message?.type !== "text") continue;
+    const text = ev.message.text.trim();
+    const replyToken = ev.replyToken;
 
-      // 4-1) 圖片/影片/音檔生成類需求 → 媒體策略拒絕
+    try {
+      // 若是媒體生成需求
       if (isMediaGenerationRequest({ text, event: ev })) {
-        await client.replyMessage(ev.replyToken, [
-          { type: 'text', text: process.env.APP_MEDIA_REJECT_MSG || '目前暫不提供圖片、影片、音檔生成服務。' },
+        await client.replyMessage(replyToken, [
+          { type: "text", text: "目前暫不提供圖片、影片、音檔生成服務。" }
         ]);
         continue;
       }
 
-      // 4-2) 商品資料庫比對 → 直接回覆商品資訊（長訊息只用 reply）
+      // 商品資料庫比對
       const productMatches = matchProducts(text, { limit: 8, minScore: 0.35 });
       if (productMatches.length > 0) {
         const answer = formatProductAnswer(productMatches, text);
-        await replyOnlyLongText({ replyToken: ev.replyToken, text: answer });
+        await replySmart({ replyToken, text: answer });
         continue;
       }
 
-      // 4-3) FAQ 命中 → 送 GPT 以人設優化，再回覆（長訊息只用 reply）
+      // FAQ 命中 → 經 GPT 潤飾
       const faqAns = matchFAQ(text, { minScore: 0.45 });
       if (faqAns) {
         let finalText = faqAns;
         try {
           const refined = await refineWithPersona({
             question: text,
-            rawAnswer: faqAns,
-            maxLen: FAQ_REFINED_MAXLEN,
+            rawAnswer: faqAns
           });
           if (refined) finalText = refined;
-        } catch (e) {
-          // 若優化失敗，fallback 原 FAQ
-        }
-        await replyOnlyLongText({ replyToken: ev.replyToken, text: finalText });
+        } catch {}
+        await replySmart({ replyToken, text: finalText });
         continue;
       }
 
-      // 4-4) 其它 → 一般 GPT 對話（長訊息只用 reply）
+      // 一般 GPT 回覆
       const gpt = await askGPT({ text });
-      await replyOnlyLongText({ replyToken: ev.replyToken, text: gpt });
-
+      await replySmart({ replyToken, text: gpt });
     } catch (e) {
-      try {
-        if (ev?.replyToken) {
-          await client.replyMessage(ev.replyToken, [
-            { type: 'text', text: '抱歉，系統剛剛忙碌，請再試一次或改用其他說法。' },
-          ]);
-        }
-      } catch {}
+      await client.replyMessage(replyToken, [
+        { type: "text", text: "抱歉，系統暫時忙碌，請稍後再試。" }
+      ]);
     }
   }
 
-  // 5) 一律 200
-  return res.status(200).end();
+  res.status(200).end();
 }
