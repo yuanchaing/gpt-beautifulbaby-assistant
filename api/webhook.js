@@ -5,36 +5,34 @@ import fetch from "node-fetch";
 
 import { isMediaGenerationRequest } from "../utils/policy.js";
 import { matchFAQ, findRelatedFAQContent, extractVendorMeta } from "../utils/faq.js";
+import { matchProducts, formatProductAnswer } from "../utils/products.js";
 import { rememberLastQuestion, getLastQuestion } from "../utils/memory.js";
 
-// ======== Vercel (Next.js) API 設定：關閉 bodyParser，保留原始請求體供簽章驗證 ========
+// 關閉 bodyParser（Vercel 必要設定）
 export const config = { api: { bodyParser: false } };
 
 // ===== LINE Client =====
-const LINE_CHANNEL_ACCESS_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN || "";
-const LINE_CHANNEL_SECRET = process.env.LINE_CHANNEL_SECRET || "";
 const client = new line.Client({
-  channelAccessToken: LINE_CHANNEL_ACCESS_TOKEN,
-  channelSecret: LINE_CHANNEL_SECRET,
+  channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
+  channelSecret: process.env.LINE_CHANNEL_SECRET
 });
 
-// ===== AI（僅用於品牌/廠商：FAQ 未命中 → 結構化詢問） =====
+// ===== AI 設定（品牌查詢專用） =====
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_COMPLETION_MODEL = process.env.OPENAI_COMPLETION_MODEL || "gpt-4o";
 
-// ===== 分段設定（智慧切句） =====
+// ===== 分段設定 =====
 const LINE_SAFE_LEN = Number(process.env.LINE_SAFE_LEN || 1800);
 const LINE_REPLY_MAX = Number(process.env.LINE_REPLY_MAX || 5);
 const TRUNCATE_NOTICE =
   process.env.LINE_TRUNCATE_NOTICE ||
   "（訊息過長，部分內容已省略。如需完整內容請以現場或官網資訊為準。）";
 
-// ===== 智慧分段（以句號、頓號、換行為優先邊界）=====
+// ===== 智慧分段 =====
 function smartSplitText(text, maxLen = LINE_SAFE_LEN) {
   if (!text) return [];
   const out = [];
   let remaining = text.trim();
-
   while (remaining.length > 0) {
     if (remaining.length <= maxLen) {
       out.push(remaining);
@@ -60,7 +58,6 @@ function smartSplitText(text, maxLen = LINE_SAFE_LEN) {
   }
   return out;
 }
-
 async function replySmart({ replyToken, text }) {
   let messages = smartSplitText(text).map((t) => ({ type: "text", text: t }));
   if (messages.length > LINE_REPLY_MAX) {
@@ -89,12 +86,12 @@ function verifyLineSignature(rawBody, signature, secret) {
 function isLineVerifyTestEvent(events = []) {
   const t = new Set([
     "00000000000000000000000000000000",
-    "ffffffffffffffffffffffffffffffff",
+    "ffffffffffffffffffffffffffffffff"
   ]);
   return events.some((ev) => t.has(ev?.replyToken));
 }
 
-// ===== 品牌/廠商關鍵字 & 辨識 =====
+// ===== 品牌/廠商關鍵字判斷 =====
 const VENDOR_KEYWORDS = [
   "彼緹娃",
   "國王家族",
@@ -113,9 +110,8 @@ const VENDOR_KEYWORDS = [
   "Khuntor",
   "章成麥芽餅",
   "廠商",
-  "品牌",
+  "品牌"
 ];
-
 function extractVendorKeyword(text) {
   if (!text) return null;
   const s = String(text).toLowerCase();
@@ -125,25 +121,23 @@ function extractVendorKeyword(text) {
   return null;
 }
 
-// ===== 僅用於「FAQ 未命中」的品牌延伸：結構化 Prompt =====
-async function askGPT_vendorStructured({ vendor, address, question, context, urls, lastQuestion }) {
+// ===== 品牌結構化 Prompt =====
+async function askGPT_vendorStructured({ vendor, address, question, context, urls }) {
   const sys = [
-    "你是資料綜整助理。請僅根據提供的資料與一般常識進行說明；不可臆測或虛構細節。",
-    "凡非直接來自提供資料的延伸推斷或常識，請以【不同來源】標註該句子。",
-    "結尾務必加入：『※實際資訊以現場或官網公告為準。』",
-    "用繁體中文、條列清楚、避免冗語。",
+    "你是資料整合助理，請根據提供的資料與常識回答問題。",
+    "如有非資料直接提供的內容，需加註【不同來源】並提示以現場或官網為準。",
+    "請用繁體中文、條列清楚、自然簡潔，結尾務必附註「※實際資訊以現場或官網公告為準。」"
   ].join("\n");
 
   const user = [
     `廠商：${vendor || "未知"}`,
     `地點：${address || "未知"}`,
     `問題：${question}`,
-    `備註：請輸出問題詳細並且具完整內容與訊息；若詢問為「價格」，請說明常見價位範圍與影響因素（如杯/份/大小/配料），並指引至現場或官網查詢最新價格。`,
+    "備註：請輸出問題詳細並且具完整內容與訊息。",
     "",
-    "可用資料（FAQ 摘要，不可超出此範圍斷言）：",
+    "可用資料（FAQ 摘要）：",
     context || "（無）",
-    urls && urls.length ? `\n可能參考網址：\n- ${urls.join("\n- ")}` : "",
-    lastQuestion ? `\n使用者上一題：${lastQuestion}` : "",
+    urls && urls.length ? `\n可能參考網址：\n- ${urls.join("\n- ")}` : ""
   ].join("\n");
 
   const body = {
@@ -151,9 +145,8 @@ async function askGPT_vendorStructured({ vendor, address, question, context, url
     temperature: 0.4,
     messages: [
       { role: "system", content: sys },
-      { role: "user", content: user },
-    ],
-    // 不加 max_tokens → 讓 gpt-4o 自行輸出完整內容
+      { role: "user", content: user }
+    ]
   };
 
   try {
@@ -161,9 +154,9 @@ async function askGPT_vendorStructured({ vendor, address, question, context, url
       method: "POST",
       headers: {
         Authorization: `Bearer ${OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
+        "Content-Type": "application/json"
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify(body)
     });
     const json = await res.json();
     return json?.choices?.[0]?.message?.content?.trim() || "（無回覆）";
@@ -176,21 +169,8 @@ async function askGPT_vendorStructured({ vendor, address, question, context, url
 export default async function handler(req, res) {
   try {
     const rawBody = await readRawBody(req);
-
-    // --- 開發/健康檢查用：允許 ping（不帶簽章也回 200）
-    // 啟用方式：在 Vercel 環境變數設 ALLOW_WEBHOOK_PING=1
-    if (
-      process.env.ALLOW_WEBHOOK_PING === "1" &&
-      (req.method === "GET" || (req.method === "POST" && !req.headers["x-line-signature"]))
-    ) {
-      res.status(200).send("pong");
-      return;
-    }
-
-    // --- 簽章驗證（必須用 raw body）
     const signature = req.headers["x-line-signature"];
-    if (!verifyLineSignature(rawBody, signature, LINE_CHANNEL_SECRET)) {
-      // 簽章錯誤會讓 LINE 收不到回覆，請檢查：bodyParser 是否關閉 / secret 是否正確
+    if (!verifyLineSignature(rawBody, signature, process.env.LINE_CHANNEL_SECRET)) {
       return res.status(401).send("Invalid signature");
     }
 
@@ -205,68 +185,65 @@ export default async function handler(req, res) {
       const userId = ev?.source?.userId || "";
 
       try {
-        // 擋掉媒體生成
         if (isMediaGenerationRequest({ text, event: ev })) {
           await client.replyMessage(replyToken, [
-            { type: "text", text: "目前僅提供觀光工廠與品牌成員的文字資訊服務。" },
+            { type: "text", text: "目前僅提供觀光工廠與品牌成員的文字資訊服務。" }
           ]);
           continue;
         }
 
-        // FAQ（一般問題只回 FAQ）
-        const faqAnsDirect = matchFAQ(text, { minScore: 0.45 });
-
-        // 品牌承接：當前問題取不到 → 用上一題補
-        const lastQ = getLastQuestion(userId);
-        let vendor = extractVendorKeyword(text) || extractVendorKeyword(lastQ || "");
-
-        if (vendor) {
-          // ——【品牌 / 廠商分支】——
-          // 提高 FAQ 命中率（品牌 + 當前問題）
-          const qForFAQ = vendor && !text.includes(vendor) ? `${vendor} ${text}` : text;
-          const faqAns = matchFAQ(qForFAQ, { minScore: 0.45 }) || faqAnsDirect;
-
-          if (faqAns) {
-            await replySmart({ replyToken, text: faqAns });
-          } else {
-            // FAQ 未命中 → 從 FAQ 萃取品牌脈絡（地址/網址/摘要）+ 結構化 Prompt 問 GPT
-            const meta = extractVendorMeta(vendor); // { context, address, phone, urls }
-            const answer = await askGPT_vendorStructured({
-              vendor,
-              address: meta.address,
-              question: text,
-              context: meta.context,
-              urls: meta.urls,
-              lastQuestion: lastQ || null,
-            });
-            await replySmart({ replyToken, text: answer });
-          }
-        } else {
-          // ——【一般問題分支】——
-          if (faqAnsDirect) {
-            await replySmart({ replyToken, text: faqAnsDirect });
-          } else {
-            await replySmart({
-              replyToken,
-              text: "目前僅提供與觀光工廠、品牌成員相關的資訊。",
-            });
-          }
+        // 1️⃣ FAQ 命中
+        const faqAns = matchFAQ(text, { minScore: 0.4 });
+        if (faqAns) {
+          await replySmart({ replyToken, text: faqAns });
+          rememberLastQuestion(userId, text);
+          continue;
         }
 
-        // 記住上一題（無 DB、同一實例有效）
+        // 2️⃣ 商品命中
+        const productMatches = matchProducts(text, { limit: 5, minScore: 0.35 });
+        if (productMatches.length > 0) {
+          const answer = formatProductAnswer(productMatches, text);
+          await replySmart({ replyToken, text: answer });
+          rememberLastQuestion(userId, text);
+          continue;
+        }
+
+        // 3️⃣ FAQ / 商品都沒命中
+        const lastQ = getLastQuestion(userId);
+        const vendor = extractVendorKeyword(text) || extractVendorKeyword(lastQ || "");
+
+        if (vendor) {
+          // ➤ 廠商問題 → 用結構化 Prompt
+          const meta = extractVendorMeta(vendor);
+          const gptAnswer = await askGPT_vendorStructured({
+            vendor,
+            address: meta.address,
+            question: text,
+            context: meta.context,
+            urls: meta.urls
+          });
+          await replySmart({ replyToken, text: gptAnswer });
+        } else {
+          // ➤ 一般問題 → 回固定提示
+          await replySmart({
+            replyToken,
+            text: "目前僅提供與觀光工廠、品牌成員相關的資訊。"
+          });
+        }
+
         rememberLastQuestion(userId, text);
-      } catch (innerErr) {
-        console.error("handler inner error:", innerErr);
+      } catch (err) {
+        console.error("Error handling event:", err);
         await client.replyMessage(replyToken, [
-          { type: "text", text: "抱歉，系統忙碌，請稍後再試。" },
+          { type: "text", text: "抱歉，系統忙碌，請稍後再試。" }
         ]);
       }
     }
 
     res.status(200).end();
-  } catch (e) {
-    console.error("webhook fatal error:", e);
-    // 仍回 200，避免 LINE 無限重送
+  } catch (err) {
+    console.error("webhook error:", err);
     res.status(200).end();
   }
 }
