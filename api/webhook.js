@@ -11,12 +11,19 @@ import { matchProducts, formatProductAnswer } from '../utils/products.js';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const OPENAI_COMPLETION_MODEL = process.env.OPENAI_COMPLETION_MODEL || 'gpt-4o-mini';
 
-// FAQ 優化輸出長度（<=0 代表不限長度；不限時我們在 faq-refiner 會不帶 max_tokens）
+// FAQ 優化輸出長度（<=0 代表不限長度）
 const FAQ_REFINED_MAXLEN = (process.env.FAQ_REFINED_MAXLEN === undefined)
   ? 250
   : Number(process.env.FAQ_REFINED_MAXLEN);
 
-// LINE Bot 憑證（務必來自 Messaging API Channel）
+// LINE 文字訊息安全長度（可用環境變數覆蓋）
+const LINE_MAX_CHARS = Number(process.env.LINE_MAX_CHARS || 1800);
+// 一次 reply 最多 5 則訊息（LINE 限制）
+const LINE_REPLY_MAX = Number(process.env.LINE_REPLY_MAX || 5);
+// 超過可回覆上限時是否加上截斷提示
+const LINE_TRUNCATE_NOTICE = process.env.LINE_TRUNCATE_NOTICE ?? '（訊息過長，已截斷。如需完整內容請輸入更精準的關鍵字。）';
+
+// LINE Bot 憑證
 const client = new line.Client({
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
   channelSecret: process.env.LINE_CHANNEL_SECRET,
@@ -50,7 +57,57 @@ function isLineVerifyTestEvent(events = []) {
   return events.some((ev) => ev?.replyToken && TEST_TOKENS.has(ev.replyToken));
 }
 
-// ====== 一般 GPT 封裝（不使用上下文記憶）======
+// ====== 長訊息切分（僅 reply，不做 push）======
+function splitLongText(text, max = LINE_MAX_CHARS) {
+  if (!text) return [''];
+  const chunks = [];
+  const paras = String(text).split(/\n{2,}/); // 優先以段落切
+  for (const para of paras) {
+    if (para.length <= max) {
+      chunks.push(para);
+      continue;
+    }
+    // 段落仍超長 → 以單行切
+    const lines = para.split('\n');
+    let buf = '';
+    for (const ln of lines) {
+      const next = buf ? `${buf}\n${ln}` : ln;
+      if (next.length > max) {
+        if (buf) chunks.push(buf);
+        if (ln.length <= max) {
+          buf = ln;
+        } else {
+          // 單行仍超長 → 以字元硬切
+          for (let i = 0; i < ln.length; i += max) {
+            chunks.push(ln.slice(i, i + max));
+          }
+          buf = '';
+        }
+      } else {
+        buf = next;
+      }
+    }
+    if (buf) chunks.push(buf);
+  }
+  return chunks;
+}
+
+async function replyOnlyLongText({ replyToken, text }) {
+  let parts = splitLongText(text);
+  // 只允許回覆最多 LINE_REPLY_MAX 則
+  if (parts.length > LINE_REPLY_MAX) {
+    // 將最後一則改為「截斷提示」
+    const head = parts.slice(0, LINE_REPLY_MAX - 1);
+    const last = parts[LINE_REPLY_MAX - 1] || '';
+    const tailNotice = (LINE_TRUNCATE_NOTICE && typeof LINE_TRUNCATE_NOTICE === 'string')
+      ? `\n\n${LINE_TRUNCATE_NOTICE}` : '';
+    parts = [...head, `${last}${tailNotice}`];
+  }
+  const messages = parts.map(t => ({ type: 'text', text: t }));
+  await client.replyMessage(replyToken, messages);
+}
+
+// ---- 一般 GPT 封裝（不使用上下文記憶）----
 async function askGPT({ text }) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), Number(process.env.OPENAI_TIMEOUT || 9000));
@@ -71,7 +128,7 @@ async function askGPT({ text }) {
       { role: 'user', content: text },
     ],
     temperature: 0.3,
-    max_tokens: 600,
+    max_tokens: 700,
   };
 
   try {
@@ -131,17 +188,15 @@ export default async function handler(req, res) {
         continue;
       }
 
-      // 4-2) 商品資料庫比對 → 直接回覆商品資訊
+      // 4-2) 商品資料庫比對 → 直接回覆商品資訊（長訊息只用 reply）
       const productMatches = matchProducts(text, { limit: 8, minScore: 0.35 });
       if (productMatches.length > 0) {
         const answer = formatProductAnswer(productMatches, text);
-        await client.replyMessage(ev.replyToken, [
-          { type: 'text', text: answer.slice(0, 5000) },
-        ]);
+        await replyOnlyLongText({ replyToken: ev.replyToken, text: answer });
         continue;
       }
 
-      // 4-3) FAQ 命中 → 送 GPT 以人設優化，再回覆
+      // 4-3) FAQ 命中 → 送 GPT 以人設優化，再回覆（長訊息只用 reply）
       const faqAns = matchFAQ(text, { minScore: 0.45 });
       if (faqAns) {
         let finalText = faqAns;
@@ -149,24 +204,20 @@ export default async function handler(req, res) {
           const refined = await refineWithPersona({
             question: text,
             rawAnswer: faqAns,
-            maxLen: FAQ_REFINED_MAXLEN, // <=0 時 faq-refiner 會不帶 max_tokens
+            maxLen: FAQ_REFINED_MAXLEN,
           });
           if (refined) finalText = refined;
         } catch (e) {
           // 若優化失敗，fallback 原 FAQ
         }
-
-        await client.replyMessage(ev.replyToken, [
-          { type: 'text', text: finalText.slice(0, 5000) },
-        ]);
+        await replyOnlyLongText({ replyToken: ev.replyToken, text: finalText });
         continue;
       }
 
-      // 4-4) 其它 → 一般 GPT 對話（不含上下文記憶）
+      // 4-4) 其它 → 一般 GPT 對話（長訊息只用 reply）
       const gpt = await askGPT({ text });
-      await client.replyMessage(ev.replyToken, [
-        { type: 'text', text: gpt.slice(0, 5000) },
-      ]);
+      await replyOnlyLongText({ replyToken: ev.replyToken, text: gpt });
+
     } catch (e) {
       try {
         if (ev?.replyToken) {
