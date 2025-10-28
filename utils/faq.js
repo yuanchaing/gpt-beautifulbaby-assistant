@@ -1,11 +1,10 @@
 // utils/faq.js
-// 改進版：FAQ 模糊比對 + 關鍵字包含命中（短詞優化）
 import fs from "fs";
 import path from "path";
 
 const faqPath = path.join(process.cwd(), "storage", "faq.json");
 
-// 讀取 FAQ
+// ===== FAQ 資料讀取 =====
 let FAQ_LIST = [];
 try {
   const raw = fs.readFileSync(faqPath, "utf8");
@@ -14,7 +13,7 @@ try {
   FAQ_LIST = [];
 }
 
-// ---------- 工具 ----------
+// ====== 工具：文字處理 ======
 function normalize(str) {
   return String(str || "")
     .toLowerCase()
@@ -22,16 +21,22 @@ function normalize(str) {
     .trim();
 }
 
+// 中文簡易分詞（以常見連接詞、標點符號分隔）
+function tokenize(str) {
+  return normalize(str)
+    .replace(/[，。！？；、：]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+// ====== 工具：模糊比對 (Dice bigram) ======
 function toBigrams(str) {
   const s = normalize(str);
   if (s.length < 2) return s ? [s] : [];
   const arr = [];
-  for (let i = 0; i < s.length - 1; i++) {
-    arr.push(s.slice(i, i + 2));
-  }
+  for (let i = 0; i < s.length - 1; i++) arr.push(s.slice(i, i + 2));
   return arr;
 }
-
 function diceSimilarity(a, b) {
   const A = toBigrams(a);
   const B = toBigrams(b);
@@ -50,24 +55,26 @@ function diceSimilarity(a, b) {
   return (2 * inter) / (A.length + B.length);
 }
 
-function bestMatchIndex(input, candidates) {
-  let best = { index: -1, score: 0 };
-  for (let i = 0; i < candidates.length; i++) {
-    const s = diceSimilarity(input, candidates[i]);
-    if (s > best.score) best = { index: i, score: s };
-  }
-  return best;
+// ====== 工具：關鍵字交集分數 ======
+function keywordOverlap(a, b) {
+  const A = new Set(tokenize(a));
+  const B = new Set(tokenize(b));
+  if (A.size === 0 || B.size === 0) return 0;
+  let inter = 0;
+  for (const token of A) if (B.has(token)) inter++;
+  return inter / Math.min(A.size, B.size);
 }
 
-// ---------- 主功能 ----------
+// ====== 主功能：FAQ 比對 ======
 export function matchFAQ(input, { minScore = 0.4 } = {}) {
   if (!Array.isArray(FAQ_LIST) || FAQ_LIST.length === 0) return null;
+
   const questions = FAQ_LIST.map((q) => q.question || q.q).filter(Boolean);
   if (questions.length === 0) return null;
 
   const normalizedInput = normalize(input);
 
-  // (1) 直接包含關鍵字的匹配（最寬鬆）
+  // (1) 完整包含判斷（直接包含）
   const contain = FAQ_LIST.find(
     (item) =>
       normalize(item?.question || "").includes(normalizedInput) ||
@@ -75,15 +82,22 @@ export function matchFAQ(input, { minScore = 0.4 } = {}) {
   );
   if (contain) return contain.answer || contain.a || null;
 
-  // (2) 模糊比對（短詞放寬）
-  const dynamicMin = normalizedInput.length <= 4 ? 0.2 : minScore;
-  const { index, score } = bestMatchIndex(input, questions);
-  if (index < 0 || score < dynamicMin) return null;
-  const item = FAQ_LIST[index];
-  return item?.answer || item?.a || null;
+  // (2) 關鍵字交集 & 模糊比對
+  let best = { item: null, score: 0 };
+  for (const item of FAQ_LIST) {
+    const qText = item?.question || item?.q || "";
+    const dice = diceSimilarity(input, qText);
+    const overlap = keywordOverlap(input, qText);
+    const score = dice * 0.6 + overlap * 0.4; // 混合分數
+    if (score > best.score) best = { item, score };
+  }
+
+  const dynamicMin = normalizedInput.length <= 4 ? 0.25 : minScore;
+  if (best.score < dynamicMin) return null;
+  return best.item?.answer || best.item?.a || null;
 }
 
-// ---------- 品牌延伸搜尋 ----------
+// ====== 品牌延伸搜尋 ======
 export function findRelatedFAQContent(keyword) {
   if (!Array.isArray(FAQ_LIST) || FAQ_LIST.length === 0) return null;
   if (!keyword) return null;
@@ -100,7 +114,7 @@ export function findRelatedFAQContent(keyword) {
   return related || null;
 }
 
-// ---------- 品牌資料擷取 ----------
+// ====== 品牌資料擷取 ======
 function extractMetaFromText(text) {
   const meta = { address: null, phone: null, urls: [] };
   if (!text) return meta;
