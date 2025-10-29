@@ -1,6 +1,9 @@
 // utils/faq.js
-// 修正點：正確處理 q 為「字串或陣列」的情況，避免空字串造成永遠命中第一筆；
-// 模糊比對會對所有別名取最大分數；findRelated 也會檢索所有別名。
+// 修正點：
+// 1) 正確處理 q 為「字串或陣列」；
+// 2) 短詞(長度<=2)只允許「完全相等」命中，避免「建議」命中「建議商品」；
+// 3) 模糊比對對每題所有別名取最大分數；
+// 4) findRelated 也會檢索所有別名。
 import fs from "fs";
 import path from "path";
 
@@ -29,6 +32,7 @@ function getQuestionTexts(item) {
 function normalize(str) {
   return String(str || "").toLowerCase().replace(/\s+/g, "").trim();
 }
+
 function toBigrams(str) {
   const s = normalize(str);
   if (s.length < 2) return s ? [s] : [];
@@ -36,6 +40,7 @@ function toBigrams(str) {
   for (let i = 0; i < s.length - 1; i++) arr.push(s.slice(i, i + 2));
   return arr;
 }
+
 function diceSimilarity(a, b) {
   const A = toBigrams(a);
   const B = toBigrams(b);
@@ -55,43 +60,54 @@ function diceSimilarity(a, b) {
 
 /**
  * 嚴謹版 FAQ 命中：
- * 1) 「包含判斷」只能在「問題別名非空」時成立（避免 "" 命中）
- * 2) 模糊比對對所有別名取最大分數
- * 3) 短詞動態門檻較高以減少誤命中
+ * 1) 「包含判斷」：
+ *    - 若任一方長度 <= 2：只允許「完全相等」；
+ *    - 否則才允許彼此包含 (includes)。
+ * 2) 模糊比對：對每題的所有別名取「最大」相似度。
+ * 3) 短詞使用更嚴格的動態門檻。
  */
 export function matchFAQ(input, { minScore = 0.5 } = {}) {
   if (!Array.isArray(FAQ_LIST) || FAQ_LIST.length === 0) return null;
   const normalizedInput = normalize(input);
   if (!normalizedInput) return null;
 
-  // 1) 精確/包含：任一別名命中才算
+  // 1) 精確 / 包含 判斷（處理短詞）
   for (const item of FAQ_LIST) {
-    const qs = getQuestionTexts(item);
-    for (const qt of qs) {
+    const aliases = getQuestionTexts(item);
+    for (const alias of aliases) {
       const ni = normalizedInput;
-      const nq = normalize(qt);
-      if (!nq) continue; // 不能用空字串
+      const nq = normalize(alias);
+      if (!nq) continue;
+
+      // 短詞只允許完全相等
+      if (ni.length <= 2 || nq.length <= 2) {
+        if (ni === nq) return item?.answer || item?.a || null;
+        continue;
+      }
+
+      // 一般情況允許彼此包含
       if (nq.includes(ni) || ni.includes(nq)) {
         return item?.answer || item?.a || null;
       }
     }
   }
 
-  // 2) 模糊比對：對每題的所有別名取「最大」相似度
+  // 2) 模糊比對：針對每題的所有別名取最大分數
   let best = { item: null, score: 0 };
   for (const item of FAQ_LIST) {
-    const qs = getQuestionTexts(item);
+    const aliases = getQuestionTexts(item);
     let maxForItem = 0;
-    for (const qt of qs) {
-      const s = diceSimilarity(input, qt);
+    for (const alias of aliases) {
+      const s = diceSimilarity(input, alias);
       if (s > maxForItem) maxForItem = s;
     }
     if (maxForItem > best.score) best = { item, score: maxForItem };
   }
 
-  // 動態門檻：短詞更嚴格
+  // 3) 動態門檻：短詞更嚴格，避免「推」、「建議」類別誤命中
   const dynamicMin = normalizedInput.length <= 4 ? Math.max(minScore, 0.6) : minScore;
   if (best.score < dynamicMin) return null;
+
   return best.item?.answer || best.item?.a || null;
 }
 
@@ -103,9 +119,9 @@ export function findRelatedFAQContent(keyword) {
 
   const blocks = [];
   for (const item of FAQ_LIST) {
-    const qs = getQuestionTexts(item).map((t) => normalize(t));
+    const aliases = getQuestionTexts(item).map((t) => normalize(t));
     const a = normalize(item?.answer || item?.a || "");
-    const joined = qs.join("") + a;
+    const joined = aliases.join("") + a;
     if (joined.includes(key)) {
       const title = getQuestionTexts(item)[0] || "(未命名)";
       blocks.push(`【${title}】\n${item?.answer || item?.a || ""}`);
