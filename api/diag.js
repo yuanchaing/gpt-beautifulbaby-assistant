@@ -1,10 +1,11 @@
 // api/diag.js
-// 說明：用來診斷目前部署環境是否有讀到 FAQ 與 Products，並模擬輸入的決策流程。
+// 用來診斷部署環境是否讀到 FAQ / Products，並用「與 webhook 相同」的決策順序：
+// 1) product → 2) vendor (vendor-aware FAQ，否則 GPT) → 3) faq → 4) fallback
 import fs from "fs";
 import path from "path";
 import { matchFAQ } from "../utils/faq.js";
 
-// 如果你的專案已經有 utils/products.js，就使用它；否則 fallback 簡易讀檔。
+// 如果你的專案已經有 utils/products.js，就使用它；否則 fallback 簡易讀檔（僅統計，不做比對）
 let productsUtils = null;
 try {
   productsUtils = await import("../utils/products.js");
@@ -18,7 +19,11 @@ function loadJSON(relPath) {
     if (!fs.existsSync(p)) return { ok: false, reason: "not_found", path: p };
     const txt = fs.readFileSync(p, "utf8");
     const json = JSON.parse(txt);
-    return { ok: true, path: p, count: Array.isArray(json) ? json.length : (json && json.items ? json.items.length : 0), sample: Array.isArray(json) ? json.slice(0, 3) : json };
+    const count = Array.isArray(json)
+      ? json.length
+      : (json && Array.isArray(json.items) ? json.items.length : 0);
+    const sample = Array.isArray(json) ? json.slice(0, 3) : json;
+    return { ok: true, path: p, count, sample };
   } catch (e) {
     return { ok: false, reason: String(e), path: path.join(process.cwd(), relPath) };
   }
@@ -27,10 +32,10 @@ function loadJSON(relPath) {
 const VENDOR_KEYWORDS = [
   "彼緹娃","國王家族","Kings Family","上雅禮品","智匠工藝社",
   "Les OMBRES","Les OMBRES d’Ambre","八木茶飲","巷隅咖啡","Lane Corner Café",
-  "日寶食品","佛都愛玉","御品紅豆","鯤島","Khuntor","章成麥芽餅","廠商","品牌"
+  "日寶食品","佛都愛玉","御品紅豆","鯤島","Khuntor","泰興肉脯","廠商","品牌"
 ];
 
-function extractVendorKeyword(text) {
+function detectVendor(text) {
   if (!text) return null;
   const s = String(text).toLowerCase();
   for (const k of VENDOR_KEYWORDS) {
@@ -45,66 +50,69 @@ export default async function handler(req, res) {
   const faq = loadJSON("storage/faq.json");
   const prod = loadJSON("storage/products.json");
 
-  // 商品比對（如果專案有 utils/products，就用；否則簡單包含測試）
+  // 產品比對（若 utils/products.js 存在）
   let productHit = null;
   if (q && productsUtils?.matchProducts) {
     try {
       const matches = productsUtils.matchProducts(q, { limit: 5, minScore: 0.35 }) || [];
-      productHit = {
-        usedUtils: true,
-        count: matches.length,
-        top: matches.slice(0, 3)
-      };
+      productHit = { usedUtils: true, count: matches.length, top: matches.slice(0, 3) };
     } catch (e) {
       productHit = { usedUtils: true, error: String(e) };
     }
-  } else if (q && prod.ok && Array.isArray(prod.sample)) {
-    // 簡易 fallback：名稱包含就當命中（僅供診斷）
-    const arr = prod.sample;
-    const hits = arr.filter(it => {
-      const name = (it.name || it.title || "").toString().toLowerCase();
-      return name && q.toLowerCase().includes(name.substring(0, Math.min(4, name.length)));
-    });
-    productHit = { usedUtils: false, count: hits.length, top: hits.slice(0, 3) };
   }
 
-  // FAQ 比對
+  // FAQ 比對（一般 & vendor-aware）
   let faqHit = null;
+  let faqVendorHit = null;
+  const vendor = q ? detectVendor(q) : null;
+
   if (q) {
     try {
+      // vendor-aware FAQ：把品牌名拼進去再試一次（與 webhook 相同策略）
+      if (vendor) {
+        const vq = `${vendor} ${q}`;
+        const ansV = matchFAQ(vq, { minScore: 0.5 });
+        faqVendorHit = { matched: !!ansV, preview: ansV ? ansV.slice(0, 100) : null };
+      }
+      // 一般 FAQ
       const ans = matchFAQ(q, { minScore: 0.5 });
-      faqHit = { matched: !!ans, preview: ans ? ans.substring(0, 100) : null };
+      faqHit = { matched: !!ans, preview: ans ? ans.slice(0, 100) : null };
     } catch (e) {
       faqHit = { error: String(e) };
     }
   }
 
-  // 品牌關鍵字偵測
-  const vendor = q ? extractVendorKeyword(q) : null;
-
-  // Pipeline 決策（和 webhook 同順序：產品 -> FAQ -> 品牌 -> fallback）
-  let pipelineDecision = "fallback";
-  if (productHit && productHit.count > 0) pipelineDecision = "product";
-  else if (faqHit && faqHit.matched) pipelineDecision = "faq";
-  else if (vendor) pipelineDecision = "vendor-gpt";
-  else pipelineDecision = "fallback";
+  // —— 決策順序需與 webhook 完全一致 ——
+  let decision = "fallback";
+  if (productHit && productHit.count > 0) {
+    decision = "product";
+  } else if (vendor) {
+    // vendor-aware 優先：若 vendor-aware FAQ 命中 → vendor-faq
+    if (faqVendorHit?.matched) decision = "vendor-faq";
+    else decision = "vendor-gpt";
+  } else if (faqHit?.matched) {
+    decision = "faq";
+  } else {
+    decision = "fallback";
+  }
 
   res.status(200).json({
     ok: true,
     tips: [
-      "1) faq.ok==true 且 count>0 才代表部署版有讀到 FAQ。",
-      "2) products.ok==true 且 count>0 才代表部署版有讀到商品。",
-      "3) 帶 ?q=你的句子 可看實際決策(product/faq/vendor/fallback)。",
-      "4) 如果所有輸入都命中某一題，請檢查 storage/faq.json 的實際內容是否只有那一題。"
+      "1) faq.ok==true 且 count>0 → 部署已讀到 FAQ。",
+      "2) products.ok==true 且 count>0 → 部署已讀到商品。",
+      "3) 決策順序與 webhook 一致：product → vendor(vendor-faq/vendor-gpt) → faq → fallback。",
+      "4) query 參數 q 可模擬實際問題（例如 ?q=佛都愛玉 價格）。"
     ],
     faq,
     products: prod,
     test: {
       q,
-      productHit,
-      faqHit,
       vendorDetected: vendor,
-      decision: pipelineDecision
+      productHit,
+      faqVendorHit,
+      faqHit,
+      decision
     }
   });
 }
