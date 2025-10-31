@@ -4,30 +4,27 @@ import * as line from "@line/bot-sdk";
 import fetch from "node-fetch";
 
 import { isMediaGenerationRequest } from "../utils/policy.js";
-import { matchFAQ, findRelatedFAQContent, extractVendorMeta } from "../utils/faq.js";
+import { matchFAQ, extractVendorMeta } from "../utils/faq.js";
 import { matchProducts, formatProductAnswer } from "../utils/products.js";
 
-// 關閉 bodyParser（LINE 簽章驗證用）
+// ------- 基本設定 -------
 export const config = { api: { bodyParser: false } };
 
-// LINE Client
 const client = new line.Client({
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
   channelSecret: process.env.LINE_CHANNEL_SECRET
 });
 
-// GPT（用於品牌延伸查詢）
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_COMPLETION_MODEL = process.env.OPENAI_COMPLETION_MODEL || "gpt-4o";
 
-// 分段回覆設定
+// ------- 分段回覆（避免超字數） -------
 const LINE_SAFE_LEN = Number(process.env.LINE_SAFE_LEN || 1800);
 const LINE_REPLY_MAX = Number(process.env.LINE_REPLY_MAX || 5);
 const TRUNCATE_NOTICE =
   process.env.LINE_TRUNCATE_NOTICE ||
   "（訊息過長，部分內容已省略。如需完整內容請以現場或官網資訊為準。）";
 
-// 智慧分段（以句號、頓號、換行為優先邊界）
 function smartSplitText(text, maxLen = LINE_SAFE_LEN) {
   if (!text) return [];
   const out = [];
@@ -60,7 +57,7 @@ function smartSplitText(text, maxLen = LINE_SAFE_LEN) {
 }
 
 async function replySmart({ replyToken, text }) {
-  let messages = smartSplitText(text).map(t => ({ type: "text", text: t }));
+  let messages = smartSplitText(text).map((t) => ({ type: "text", text: t }));
   if (messages.length > LINE_REPLY_MAX) {
     messages = messages.slice(0, LINE_REPLY_MAX - 1);
     messages.push({ type: "text", text: TRUNCATE_NOTICE });
@@ -68,11 +65,11 @@ async function replySmart({ replyToken, text }) {
   await client.replyMessage(replyToken, messages);
 }
 
-// 讀取 rawBody + 驗證簽章
+// ------- 驗簽 / 讀原始請求體 -------
 async function readRawBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
-    req.on("data", c => chunks.push(c));
+    req.on("data", (c) => chunks.push(c));
     req.on("end", () => resolve(Buffer.concat(chunks)));
     req.on("error", reject);
   });
@@ -91,10 +88,10 @@ function isLineVerifyTestEvent(events = []) {
     "00000000000000000000000000000000",
     "ffffffffffffffffffffffffffffffff"
   ]);
-  return events.some(ev => t.has(ev?.replyToken));
+  return events.some((ev) => t.has(ev?.replyToken));
 }
 
-// 品牌清單（用於關鍵字判斷）
+// ------- 品牌關鍵字偵測 -------
 const VENDOR_KEYWORDS = [
   "彼緹娃",
   "國王家族",
@@ -111,7 +108,7 @@ const VENDOR_KEYWORDS = [
   "御品紅豆",
   "鯤島",
   "Khuntor",
-  "泰興肉脯",
+  "章成麥芽餅",
   "廠商",
   "品牌"
 ];
@@ -125,7 +122,14 @@ function extractVendorKeyword(text) {
   return null;
 }
 
-// GPT：結構化查詢品牌資訊
+// ------- 忽略清單（讓 LINE 後台自動回覆單獨顯示） -------
+const PASS_THROUGH_KEYWORDS = new Set([
+  // 這些關鍵字來自 Rich Menu，用於觸發 LINE 後台的多頁訊息 / Flex
+  "五大明星商品"
+  // 需要時可自行增加，例如 "熱門活動", "本月優惠"
+]);
+
+// ------- GPT：品牌延伸查詢 -------
 async function askGPT_vendorStructured({ vendor, address, question, context, urls }) {
   const sys = [
     "你是資料整合助理，請根據提供的資料與常識回答問題。",
@@ -169,7 +173,14 @@ async function askGPT_vendorStructured({ vendor, address, question, context, url
   }
 }
 
-// 主處理
+// FAQ 是否缺乏價格資訊（若只有介紹，應轉交 GPT）
+function faqSeemsIncompleteForVendor(ans) {
+  if (!ans) return true;
+  const priceWords = ["價", "費", "優惠", "方案", "$", "元"];
+  return !priceWords.some((w) => ans.includes(w));
+}
+
+// ------- 主處理 -------
 export default async function handler(req, res) {
   const rawBody = await readRawBody(req);
   const signature = req.headers["x-line-signature"];
@@ -182,69 +193,79 @@ export default async function handler(req, res) {
   if (isLineVerifyTestEvent(events)) return res.status(200).end();
 
   for (const ev of events) {
-    if (ev?.type !== "message" || ev?.message?.type !== "text") continue;
-    const text = (ev.message.text || "").trim();
-    const replyToken = ev.replyToken;
-
-    try {
-      // 擋影像生成
-      if (isMediaGenerationRequest({ text, event: ev })) {
-        await client.replyMessage(replyToken, [
-          { type: "text", text: "目前僅提供觀光工廠與品牌成員的文字資訊服務。" }
-        ]);
+    // 直接穿透：Rich Menu 觸發的特定文字，交由 LINE 後台訊息回覆，不再由 AI 回覆
+    if (ev?.type === "message" && ev?.message?.type === "text") {
+      const exactText = (ev.message.text || "").trim();
+      if (PASS_THROUGH_KEYWORDS.has(exactText)) {
+        // 不呼叫 replyMessage，單純結束本輪處理
         continue;
       }
-
-      // 1) 商品命中（最高優先）
-      const productMatches = matchProducts(text, { limit: 5, minScore: 0.35 });
-      if (productMatches.length > 0) {
-        const answer = formatProductAnswer(productMatches, text);
-        await replySmart({ replyToken, text: answer });
-        continue;
-      }
-
-      // 2) 廠商/品牌問題（第二優先）
-      const vendor = extractVendorKeyword(text);
-      if (vendor) {
-        // 2a) 先嘗試「帶品牌」的 FAQ 命中（避免被一般 FAQ 誤攔）
-        const vendorAwareQ = `${vendor} ${text}`;
-        const faqAnsVendor = matchFAQ(vendorAwareQ, { minScore: 0.5 });
-
-        if (faqAnsVendor) {
-          await replySmart({ replyToken, text: faqAnsVendor });
-        } else {
-          // 2b) FAQ 沒命中 → 用 FAQ 內與品牌相關內容當 context，交 GPT 延伸
-          const meta = extractVendorMeta(vendor); // { context, address, phone, urls }
-          const gptAnswer = await askGPT_vendorStructured({
-            vendor,
-            address: meta.address,
-            question: text,
-            context: meta.context,
-            urls: meta.urls
-          });
-          await replySmart({ replyToken, text: gptAnswer });
-        }
-        continue;
-      }
-
-      // 3) FAQ 命中（第三優先）
-      const faqAns = matchFAQ(text, { minScore: 0.5 });
-      if (faqAns) {
-        await replySmart({ replyToken, text: faqAns });
-        continue;
-      }
-
-      // 4) fallback
-      await replySmart({
-        replyToken,
-        text: "目前僅提供與觀光工廠、品牌成員相關的資訊。"
-      });
-    } catch (err) {
-      console.error("error:", err);
-      await client.replyMessage(replyToken, [
-        { type: "text", text: "抱歉，系統忙碌，請稍後再試。" }
-      ]);
     }
+
+    if (ev?.type === "message" && ev?.message?.type === "text") {
+      const text = (ev.message.text || "").trim();
+      const replyToken = ev.replyToken;
+
+      try {
+        // 禁止影像生成
+        if (isMediaGenerationRequest({ text, event: ev })) {
+          await client.replyMessage(replyToken, [
+            { type: "text", text: "目前僅提供觀光工廠與品牌成員的文字資訊服務。" }
+          ]);
+          continue;
+        }
+
+        // 1) 商品命中（最高優先）
+        const productMatches = matchProducts(text, { limit: 5, minScore: 0.35 });
+        if (productMatches.length > 0) {
+          const answer = formatProductAnswer(productMatches, text);
+          await replySmart({ replyToken, text: answer });
+          continue;
+        }
+
+        // 2) 廠商/品牌問題（第二優先）
+        const vendor = extractVendorKeyword(text);
+        if (vendor) {
+          const vendorQ = `${vendor} ${text}`;
+          const faqAns = matchFAQ(vendorQ, { minScore: 0.5 });
+
+          if (faqAns && !faqSeemsIncompleteForVendor(faqAns)) {
+            await replySmart({ replyToken, text: faqAns });
+          } else {
+            const meta = extractVendorMeta(vendor);
+            const gptAnswer = await askGPT_vendorStructured({
+              vendor,
+              address: meta.address,
+              question: text,
+              context: meta.context,
+              urls: meta.urls
+            });
+            await replySmart({ replyToken, text: gptAnswer });
+          }
+          continue;
+        }
+
+        // 3) FAQ 命中（第三優先）
+        const faqAns = matchFAQ(text, { minScore: 0.5 });
+        if (faqAns) {
+          await replySmart({ replyToken, text: faqAns });
+          continue;
+        }
+
+        // 4) fallback
+        await replySmart({
+          replyToken,
+          text: "目前僅提供與觀光工廠、品牌成員相關的資訊。"
+        });
+      } catch (err) {
+        console.error("error:", err);
+        await client.replyMessage(replyToken, [
+          { type: "text", text: "抱歉，系統忙碌，請稍後再試。" }
+        ]);
+      }
+    }
+
+    // 其他事件型別（follow/join/postback 等）可視需求擴充
   }
 
   res.status(200).end();
