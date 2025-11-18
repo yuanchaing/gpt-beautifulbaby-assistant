@@ -129,12 +129,25 @@ const PASS_THROUGH_KEYWORDS = new Set([
   // 需要時可自行增加，例如 "熱門活動", "本月優惠"
 ]);
 
+// ------- 語言偵測：判斷使用者是否以中文提問 -------
+function detectUserLanguage(text) {
+  if (!text) return "zh";
+  const s = String(text);
+  // 若包含任一 CJK 統一表意文字，視為中文
+  if (/[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/.test(s)) {
+    return "zh";
+  }
+  // 其他情況一律視為英文（含英文、印尼文等）
+  return "en";
+}
+
+
 // ------- GPT：品牌延伸查詢 -------
 async function askGPT_vendorStructured({ vendor, address, question, context, urls }) {
   const sys = [
     "你是資料整合助理，請根據提供的資料與常識回答問題。",
     "如有非資料直接提供的內容，需加註【不同來源】並提示以現場或官網為準。",
-    "請用繁體中文、條列清楚、自然簡潔，結尾務必附註「※實際資訊以現場或官網公告為準。」"
+    "請用繁體中文回答、條列清楚、自然簡潔，結尾務必附註「※實際資訊以現場或官網公告為準。」"
   ].join("\n");
 
   const user = [
@@ -180,6 +193,48 @@ function faqSeemsIncompleteForVendor(ans) {
   return !priceWords.some((w) => ans.includes(w));
 }
 
+// ------- 即時翻譯：依使用者語言將中文訊息翻成英文 -------
+async function translateIfNeeded(text, userLang) {
+  if (!text) return text;
+  // 中文使用者直接原文回覆
+  if (userLang === "zh") return text;
+  // 沒有 OPENAI_API_KEY 就回原文（避免炸掉）
+  if (!OPENAI_API_KEY) return text;
+
+  const sys = [
+    "You are a translation assistant.",
+    "Translate the following Traditional Chinese text into natural, concise English suitable for a LINE chatbot reply.",
+    "Only output the translated text without any additional explanation."
+  ].join("\n");
+
+  const body = {
+    model: OPENAI_COMPLETION_MODEL,
+    temperature: 0.2,
+    messages: [
+      { role: "system", content: sys },
+      { role: "user", content: String(text) }
+    ]
+  };
+
+  try {
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    });
+    const json = await res.json();
+    return json?.choices?.[0]?.message?.content?.trim() || text;
+  } catch (err) {
+    console.error("translateIfNeeded error:", err);
+    return text;
+  }
+}
+
+
+
 // ------- 主處理 -------
 export default async function handler(req, res) {
   const rawBody = await readRawBody(req);
@@ -204,14 +259,17 @@ export default async function handler(req, res) {
 
     if (ev?.type === "message" && ev?.message?.type === "text") {
       const text = (ev.message.text || "").trim();
+      const userLang = detectUserLanguage(text);
       const replyToken = ev.replyToken;
 
       try {
         // 禁止影像生成
         if (isMediaGenerationRequest({ text, event: ev })) {
-          await client.replyMessage(replyToken, [
-            { type: "text", text: "目前僅提供觀光工廠與品牌成員的文字資訊服務。" }
-          ]);
+          const msg = await translateIfNeeded(
+            "目前僅提供觀光工廠與品牌成員的文字資訊服務。",
+            userLang
+          );
+          await client.replyMessage(replyToken, [{ type: "text", text: msg }]);
           continue;
         }
 
@@ -219,9 +277,11 @@ export default async function handler(req, res) {
         const productMatches = matchProducts(text, { limit: 5, minScore: 0.35 });
         if (productMatches.length > 0) {
           const answer = formatProductAnswer(productMatches, text);
-          await replySmart({ replyToken, text: answer });
+          const localized = await translateIfNeeded(answer, userLang);
+          await replySmart({ replyToken, text: localized });
           continue;
         }
+
 
         // 2) 廠商/品牌問題（第二優先）
         const vendor = extractVendorKeyword(text);
@@ -230,7 +290,8 @@ export default async function handler(req, res) {
           const faqAns = matchFAQ(vendorQ, { minScore: 0.5 });
 
           if (faqAns && !faqSeemsIncompleteForVendor(faqAns)) {
-            await replySmart({ replyToken, text: faqAns });
+            const localized = await translateIfNeeded(faqAns, userLang);
+            await replySmart({ replyToken, text: localized });
           } else {
             const meta = extractVendorMeta(vendor);
             const gptAnswer = await askGPT_vendorStructured({
@@ -240,28 +301,37 @@ export default async function handler(req, res) {
               context: meta.context,
               urls: meta.urls
             });
-            await replySmart({ replyToken, text: gptAnswer });
+            const localized = await translateIfNeeded(gptAnswer, userLang);
+            await replySmart({ replyToken, text: localized });
           }
           continue;
         }
 
+
         // 3) FAQ 命中（第三優先）
         const faqAns = matchFAQ(text, { minScore: 0.5 });
         if (faqAns) {
-          await replySmart({ replyToken, text: faqAns });
+          const localized = await translateIfNeeded(faqAns, userLang);
+          await replySmart({ replyToken, text: localized });
           continue;
         }
 
         // 4) fallback
+        const fallbackMsg = await translateIfNeeded(
+          "目前僅提供與觀光工廠、品牌成員相關的資訊。",
+          userLang
+        );
         await replySmart({
           replyToken,
-          text: "目前僅提供與觀光工廠、品牌成員相關的資訊。"
+          text: fallbackMsg
         });
       } catch (err) {
         console.error("error:", err);
-        await client.replyMessage(replyToken, [
-          { type: "text", text: "抱歉，系統忙碌，請稍後再試。" }
-        ]);
+        const msg = await translateIfNeeded(
+          "抱歉，系統忙碌，請稍後再試。",
+          userLang
+        );
+        await client.replyMessage(replyToken, [{ type: "text", text: msg }]);
       }
     }
 
