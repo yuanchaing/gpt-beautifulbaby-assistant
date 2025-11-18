@@ -1,162 +1,146 @@
 // utils/faq.js
-// 修正點：
-// 1) 正確處理 q 為「字串或陣列」；
-// 2) 短詞(長度<=2)只允許「完全相等」命中，避免「建議」命中「建議商品」；
-// 3) 模糊比對對每題所有別名取最大分數；
-// 4) findRelated 也會檢索所有別名。
 import fs from "fs";
 import path from "path";
+import { fileURLToPath } from "url";
 
-const faqPath = path.join(process.cwd(), "storage", "faq.json");
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-let FAQ_LIST = [];
-try {
-  FAQ_LIST = JSON.parse(fs.readFileSync(faqPath, "utf8"));
-} catch {
-  FAQ_LIST = [];
-}
+let FAQ_DATA = null;
 
-/** 將 question/q 統一轉成「非空字串陣列」 */
-function getQuestionTexts(item) {
-  const out = [];
-  const add = (v) => {
-    if (typeof v === "string" && v.trim()) out.push(v.trim());
-  };
-  if (typeof item?.question === "string") add(item.question);
-  const q = item?.q;
-  if (Array.isArray(q)) q.forEach(add);
-  else if (typeof q === "string") add(q);
-  return out;
-}
+// 載入並快取 FAQ
+function loadFAQ() {
+  if (FAQ_DATA) return FAQ_DATA;
 
-function normalize(str) {
-  return String(str || "").toLowerCase().replace(/\s+/g, "").trim();
-}
-
-function toBigrams(str) {
-  const s = normalize(str);
-  if (s.length < 2) return s ? [s] : [];
-  const arr = [];
-  for (let i = 0; i < s.length - 1; i++) arr.push(s.slice(i, i + 2));
-  return arr;
-}
-
-function diceSimilarity(a, b) {
-  const A = toBigrams(a);
-  const B = toBigrams(b);
-  if (A.length === 0 || B.length === 0) return 0;
-  const map = new Map();
-  for (const token of A) map.set(token, (map.get(token) || 0) + 1);
-  let inter = 0;
-  for (const token of B) {
-    const v = map.get(token);
-    if (v > 0) {
-      inter++;
-      map.set(token, v - 1);
-    }
+  try {
+    const faqPath = path.join(__dirname, "..", "storage", "faq.json");
+    const raw = fs.readFileSync(faqPath, "utf8");
+    FAQ_DATA = JSON.parse(raw);
+  } catch (err) {
+    console.error("[faq] Failed to load faq.json", err);
+    FAQ_DATA = [];
   }
-  return (2 * inter) / (A.length + B.length);
+
+  return FAQ_DATA;
+}
+
+// 字串正規化：全小寫、去空白
+function normalize(str) {
+  return String(str ?? "")
+    .toLowerCase()
+    .replace(/\s+/g, "");
 }
 
 /**
- * 嚴謹版 FAQ 命中：
- * 1) 「包含判斷」：
- *    - 若任一方長度 <= 2：只允許「完全相等」；
- *    - 否則才允許彼此包含 (includes)。
- * 2) 模糊比對：對每題的所有別名取「最大」相似度。
- * 3) 短詞使用更嚴格的動態門檻。
+ * FAQ 比對：
+ * - 逐一掃過 faq.json 裡的每個 q 關鍵字
+ * - 用「是否互相為 substring」的方式來算分
+ * - 分數最高且 >= minScore 的就當作命中
+ *
+ * @param {string} input 使用者輸入文字
+ * @param {{ minScore?: number }} options
+ * @returns {string|null} FAQ 回答文字（a），或 null
  */
-export function matchFAQ(input, { minScore = 0.5 } = {}) {
-  if (!Array.isArray(FAQ_LIST) || FAQ_LIST.length === 0) return null;
-  const normalizedInput = normalize(input);
-  if (!normalizedInput) return null;
+export function matchFAQ(input, options = {}) {
+  const text = normalize(input);
+  if (!text) return null;
 
-  // 1) 精確 / 包含 判斷（處理短詞）
-  for (const item of FAQ_LIST) {
-    const aliases = getQuestionTexts(item);
-    for (const alias of aliases) {
-      const ni = normalizedInput;
-      const nq = normalize(alias);
+  const { minScore = 0 } = options;
+  const faq = loadFAQ();
+
+  let bestItem = null;
+  let bestScore = 0;
+
+  for (const item of faq) {
+    if (!item || !Array.isArray(item.q)) continue;
+
+    for (const q of item.q) {
+      const nq = normalize(q);
       if (!nq) continue;
 
-      // 短詞只允許完全相等
-      if (ni.length <= 2 || nq.length <= 2) {
-        if (ni === nq) return item?.answer || item?.a || null;
-        continue;
+      let score = 0;
+
+      if (text === nq) {
+        // 完全相同
+        score = 1;
+      } else if (text.includes(nq)) {
+        // 使用者句子包含關鍵字
+        score = nq.length / text.length;
+      } else if (nq.includes(text)) {
+        // 關鍵字包含使用者句子（例如關鍵字比較長）
+        score = text.length / nq.length;
       }
 
-      // 一般情況允許彼此包含
-      if (nq.includes(ni) || ni.includes(nq)) {
-        return item?.answer || item?.a || null;
+      if (score > bestScore) {
+        bestScore = score;
+        bestItem = item;
       }
     }
   }
 
-  // 2) 模糊比對：針對每題的所有別名取最大分數
-  let best = { item: null, score: 0 };
-  for (const item of FAQ_LIST) {
-    const aliases = getQuestionTexts(item);
-    let maxForItem = 0;
-    for (const alias of aliases) {
-      const s = diceSimilarity(input, alias);
-      if (s > maxForItem) maxForItem = s;
-    }
-    if (maxForItem > best.score) best = { item, score: maxForItem };
+  if (!bestItem || bestScore < minScore) {
+    return null;
   }
 
-  // 3) 動態門檻：短詞更嚴格，避免「推」、「建議」類別誤命中
-  const dynamicMin = normalizedInput.length <= 4 ? Math.max(minScore, 0.6) : minScore;
-  if (best.score < dynamicMin) return null;
-
-  return best.item?.answer || best.item?.a || null;
+  return bestItem.a || null;
 }
 
-/** 在 FAQ 全文中搜尋與 keyword 相關的內容，回合併字串 */
-export function findRelatedFAQContent(keyword) {
-  if (!Array.isArray(FAQ_LIST) || FAQ_LIST.length === 0) return null;
-  const key = normalize(keyword);
-  if (!key) return null;
+/**
+ * 從 FAQ 中抽取品牌相關摘要，提供給 GPT 當作 context
+ *
+ * @param {string} vendor 例如「彼緹娃」、「國王家族」、「八木茶飲」…
+ * @returns {{ address: string, context: string, urls: string[] }}
+ */
+export function extractVendorMeta(vendor) {
+  if (!vendor) {
+    return { address: "", context: "", urls: [] };
+  }
 
-  const blocks = [];
-  for (const item of FAQ_LIST) {
-    const aliases = getQuestionTexts(item).map((t) => normalize(t));
-    const a = normalize(item?.answer || item?.a || "");
-    const joined = aliases.join("") + a;
-    if (joined.includes(key)) {
-      const title = getQuestionTexts(item)[0] || "(未命名)";
-      blocks.push(`【${title}】\n${item?.answer || item?.a || ""}`);
+  const v = normalize(vendor);
+  const faq = loadFAQ();
+
+  let matchedItem = null;
+
+  // 找出第一個有包含該 vendor 關鍵字的 FAQ 項目
+  for (const item of faq) {
+    if (!item || !Array.isArray(item.q)) continue;
+
+    const hit = item.q.some((q) => {
+      const nq = normalize(q);
+      if (!nq) return false;
+      return nq.includes(v) || v.includes(nq);
+    });
+
+    if (hit) {
+      matchedItem = item;
+      break;
     }
   }
-  return blocks.length ? blocks.join("\n\n") : null;
-}
 
-/** 從文字萃取地址/電話/網址（供品牌 GPT 用） */
-function extractMetaFromText(text) {
-  const meta = { address: null, phone: null, urls: [] };
-  if (!text) return meta;
+  if (!matchedItem) {
+    return { address: "", context: "", urls: [] };
+  }
 
-  const addrMatch = text.match(/(?:地址[:：]\s*|📍\s*)([^\n\r]+)/);
-  if (addrMatch) meta.address = addrMatch[1];
+  const answer = String(matchedItem.a ?? "");
 
-  const phoneMatch = text.match(/(?:電話[:：]\s*|\(?0\d{1,2}\)?[-\s]?)\d{3,4}[-\s]?\d{3,4}/);
-  if (phoneMatch) meta.phone = phoneMatch[0].replace(/^電話[:：]\s*/, "");
+  // 粗略從文字中抓出地址（📍 開頭那一行）
+  let address = "";
+  const addrMatch = answer.match(/📍\s*([^\n]+)/);
+  if (addrMatch) {
+    address = addrMatch[1].trim();
+  }
 
-  const urlRegex = /(https?:\/\/[^\s)]+)/g;
-  const urls = new Set();
+  // 抓出所有網址，當作可能官方 / FB / 店家連結
+  const urls = [];
+  const urlRegex = /(https?:\/\/[^\s]+)/g;
   let m;
-  while ((m = urlRegex.exec(text)) !== null) urls.add(m[1]);
-  meta.urls = Array.from(urls);
-  return meta;
-}
+  while ((m = urlRegex.exec(answer)) !== null) {
+    urls.push(m[1]);
+  }
 
-/** 從 FAQ 找品牌相關脈絡與 meta */
-export function extractVendorMeta(vendorKeyword) {
-  const ctx = findRelatedFAQContent(vendorKeyword) || "";
-  const meta = extractMetaFromText(ctx);
   return {
-    context: ctx || null,
-    address: meta.address || null,
-    phone: meta.phone || null,
-    urls: meta.urls || []
+    address,
+    context: answer.trim(),
+    urls
   };
 }
