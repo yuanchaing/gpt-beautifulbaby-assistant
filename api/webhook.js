@@ -237,106 +237,137 @@ async function translateIfNeeded(text, userLang) {
 
 // ------- 主處理 -------
 export default async function handler(req, res) {
-  const rawBody = await readRawBody(req);
-  const signature = req.headers["x-line-signature"];
-  if (!verifyLineSignature(rawBody, signature)) {
-    return res.status(401).send("Invalid signature");
-  }
-
-  const body = JSON.parse(rawBody.toString("utf-8") || "{}");
-  const events = body?.events || [];
-  if (isLineVerifyTestEvent(events)) return res.status(200).end();
-
-  for (const ev of events) {
-    // 直接穿透：Rich Menu 觸發的特定文字，交由 LINE 後台訊息回覆，不再由 AI 回覆
-    if (ev?.type === "message" && ev?.message?.type === "text") {
-      const exactText = (ev.message.text || "").trim();
-      if (PASS_THROUGH_KEYWORDS.has(exactText)) {
-        // 不呼叫 replyMessage，單純結束本輪處理
-        continue;
-      }
+  try {
+    // 1) 讓瀏覽器 / 健康檢查用的 GET 直接回 200
+    if (req.method !== "POST") {
+      return res
+        .status(200)
+        .json({ ok: true, path: "/api/webhook", method: req.method });
     }
 
-    if (ev?.type === "message" && ev?.message?.type === "text") {
-      const text = (ev.message.text || "").trim();
-      const userLang = detectUserLanguage(text);
-      const replyToken = ev.replyToken;
+    // 2) 讀原始 body
+    const rawBody = await readRawBody(req);
 
-      try {
-        // 禁止影像生成
-        if (isMediaGenerationRequest({ text, event: ev })) {
+    // 3) 驗簽（只有有帶簽名才驗）
+    const signature = req.headers["x-line-signature"];
+    if (signature && !verifyLineSignature(rawBody, signature)) {
+      console.warn("[webhook] Invalid LINE signature, ignore this request");
+      // 對 LINE 平台來說，只要回 200 就不會顯示「非 200」錯誤
+      return res.status(200).end();
+    }
+
+    // 4) 安全 parse JSON
+    let body = {};
+    try {
+      body = JSON.parse(rawBody.toString("utf-8") || "{}");
+    } catch (err) {
+      console.error("[webhook] JSON parse error", err);
+      return res.status(200).end();
+    }
+
+    const events = body?.events || [];
+    if (isLineVerifyTestEvent(events)) {
+      // LINE 驗證用的測試事件，直接 200
+      return res.status(200).end();
+    }
+
+
+    // 5) 這裡開始維持你原本的事件處理邏輯
+    for (const ev of events) {
+      // 直接穿透：Rich Menu 觸發的特定文字，交由 LINE 後台訊息回覆，不再由 AI 回覆
+      if (ev?.type === "message" && ev?.message?.type === "text") {
+        const exactText = (ev.message.text || "").trim();
+        if (PASS_THROUGH_KEYWORDS.has(exactText)) {
+          // 不呼叫 replyMessage，單純結束本輪處理
+          continue;
+        }
+      }
+
+      if (ev?.type === "message" && ev?.message?.type === "text") {
+        const text = (ev.message.text || "").trim();
+        const userLang = detectUserLanguage(text);
+        const replyToken = ev.replyToken;
+
+        try {
+          // 禁止影像生成
+          if (isMediaGenerationRequest({ text, event: ev })) {
+            const msg = await translateIfNeeded(
+              "目前僅提供觀光工廠與品牌成員的文字資訊服務。",
+              userLang
+            );
+            await client.replyMessage(replyToken, [{ type: "text", text: msg }]);
+            continue;
+          }
+
+          // 1) 商品命中（最高優先）
+          const productMatches = matchProducts(text, { limit: 5, minScore: 0.35 });
+          if (productMatches.length > 0) {
+            const answer = formatProductAnswer(productMatches, text);
+            const localized = await translateIfNeeded(answer, userLang);
+            await replySmart({ replyToken, text: localized });
+            continue;
+          }
+
+
+          // 2) 廠商/品牌問題（第二優先）
+          const vendor = extractVendorKeyword(text);
+          if (vendor) {
+            const vendorQ = `${vendor} ${text}`;
+            const faqAns = matchFAQ(vendorQ, { minScore: 0.5 });
+
+            if (faqAns && !faqSeemsIncompleteForVendor(faqAns)) {
+              const localized = await translateIfNeeded(faqAns, userLang);
+              await replySmart({ replyToken, text: localized });
+            } else {
+              const meta = extractVendorMeta(vendor);
+              const gptAnswer = await askGPT_vendorStructured({
+                vendor,
+                address: meta.address,
+                question: text,
+                context: meta.context,
+                urls: meta.urls
+              });
+              const localized = await translateIfNeeded(gptAnswer, userLang);
+              await replySmart({ replyToken, text: localized });
+            }
+            continue;
+          }
+
+
+          // 3) FAQ 命中（第三優先）
+          const faqAns = matchFAQ(text, { minScore: 0.5 });
+          if (faqAns) {
+            const localized = await translateIfNeeded(faqAns, userLang);
+            await replySmart({ replyToken, text: localized });
+            continue;
+          }
+
+          // 4) fallback
+          const fallbackMsg = await translateIfNeeded(
+            "目前僅提供與觀光工廠、品牌成員相關的資訊。",
+            userLang
+          );
+          await replySmart({
+            replyToken,
+            text: fallbackMsg
+          });
+        } catch (err) {
+          console.error("error:", err);
           const msg = await translateIfNeeded(
-            "目前僅提供觀光工廠與品牌成員的文字資訊服務。",
+            "抱歉，系統忙碌，請稍後再試。",
             userLang
           );
           await client.replyMessage(replyToken, [{ type: "text", text: msg }]);
-          continue;
         }
-
-        // 1) 商品命中（最高優先）
-        const productMatches = matchProducts(text, { limit: 5, minScore: 0.35 });
-        if (productMatches.length > 0) {
-          const answer = formatProductAnswer(productMatches, text);
-          const localized = await translateIfNeeded(answer, userLang);
-          await replySmart({ replyToken, text: localized });
-          continue;
-        }
-
-
-        // 2) 廠商/品牌問題（第二優先）
-        const vendor = extractVendorKeyword(text);
-        if (vendor) {
-          const vendorQ = `${vendor} ${text}`;
-          const faqAns = matchFAQ(vendorQ, { minScore: 0.5 });
-
-          if (faqAns && !faqSeemsIncompleteForVendor(faqAns)) {
-            const localized = await translateIfNeeded(faqAns, userLang);
-            await replySmart({ replyToken, text: localized });
-          } else {
-            const meta = extractVendorMeta(vendor);
-            const gptAnswer = await askGPT_vendorStructured({
-              vendor,
-              address: meta.address,
-              question: text,
-              context: meta.context,
-              urls: meta.urls
-            });
-            const localized = await translateIfNeeded(gptAnswer, userLang);
-            await replySmart({ replyToken, text: localized });
-          }
-          continue;
-        }
-
-
-        // 3) FAQ 命中（第三優先）
-        const faqAns = matchFAQ(text, { minScore: 0.5 });
-        if (faqAns) {
-          const localized = await translateIfNeeded(faqAns, userLang);
-          await replySmart({ replyToken, text: localized });
-          continue;
-        }
-
-        // 4) fallback
-        const fallbackMsg = await translateIfNeeded(
-          "目前僅提供與觀光工廠、品牌成員相關的資訊。",
-          userLang
-        );
-        await replySmart({
-          replyToken,
-          text: fallbackMsg
-        });
-      } catch (err) {
-        console.error("error:", err);
-        const msg = await translateIfNeeded(
-          "抱歉，系統忙碌，請稍後再試。",
-          userLang
-        );
-        await client.replyMessage(replyToken, [{ type: "text", text: msg }]);
       }
+
+      // 其他事件型別（follow/join/postback 等）可視需求擴充
     }
 
-    // 其他事件型別（follow/join/postback 等）可視需求擴充
+    res.status(200).end();
+ } catch (err) {
+    console.error("[webhook] Unhandled error", err);
+    // 任何例外都不要丟 500 給 LINE，統一回 200
+    return res.status(200).end();
   }
-
-  res.status(200).end();
 }
