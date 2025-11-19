@@ -236,38 +236,27 @@ async function translateIfNeeded(text, userLang) {
 
 
 // ------- 主處理 -------
-export default async function handler(req, res) {
-  try {
-    // 1) 讓瀏覽器 / 健康檢查用的 GET 直接回 200
-    if (req.method !== "POST") {
-      return res
-        .status(200)
-        .json({ ok: true, path: "/api/webhook", method: req.method });
+export default async function handler(req, res) {export default async function handler(req, res) {
+  // 讓瀏覽器直接打 GET /api/webhook 時可以看到健康狀態，不會 500
+    if (req.method === "GET") {
+      return res.status(200).json({
+        ok: true,
+        path: "/api/webhook",
+        method: "GET"
+      });
     }
 
-    // 2) 讀原始 body
     const rawBody = await readRawBody(req);
+    const signature = req.headers["x-line-signature"] || "";
 
-    // 3) 驗簽（只有有帶簽名才驗）
-    const signature = req.headers["x-line-signature"];
-    if (signature && !verifyLineSignature(rawBody, signature)) {
-      console.warn("[webhook] Invalid LINE signature, ignore this request");
-      // 對 LINE 平台來說，只要回 200 就不會顯示「非 200」錯誤
-      return res.status(200).end();
+    if (!verifyLineSignature(rawBody, signature)) {
+      // 簽章錯誤就直接回 401，LINE 上會看不到回覆
+      return res.status(401).send("Invalid signature");
     }
 
-    // 4) 安全 parse JSON
-    let body = {};
-    try {
-      body = JSON.parse(rawBody.toString("utf-8") || "{}");
-    } catch (err) {
-      console.error("[webhook] JSON parse error", err);
-      return res.status(200).end();
-    }
-
+    const body = JSON.parse(rawBody.toString("utf-8") || "{}");
     const events = body?.events || [];
     if (isLineVerifyTestEvent(events)) {
-      // LINE 驗證用的測試事件，直接 200
       return res.status(200).end();
     }
 
