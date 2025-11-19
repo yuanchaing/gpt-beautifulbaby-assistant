@@ -236,7 +236,7 @@ async function translateIfNeeded(text, userLang) {
 
 
 // ------- 主處理 -------
-export default async function handler(req, res) {export default async function handler(req, res) {
+export default async function handler(req, res){
   // 讓瀏覽器直接打 GET /api/webhook 時可以看到健康狀態，不會 500
     if (req.method === "GET") {
       return res.status(200).json({
