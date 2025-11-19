@@ -1,34 +1,20 @@
 // utils/faq.js
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
+// 直接匯入 JSON，避免在 Vercel 上用 fs 讀檔失敗
+import faqRaw from "../storage/faq.json" assert { type: "json" };
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-let FAQ_DATA = null;
-
-// 載入並快取 FAQ
-function loadFAQ() {
-  if (FAQ_DATA) return FAQ_DATA;
-
-  try {
-    const faqPath = path.join(__dirname, "..", "storage", "faq.json");
-    const raw = fs.readFileSync(faqPath, "utf8");
-    FAQ_DATA = JSON.parse(raw);
-  } catch (err) {
-    console.error("[faq] Failed to load faq.json", err);
-    FAQ_DATA = [];
-  }
-
-  return FAQ_DATA;
-}
+// 兼容不同打包結果：有些環境會把資料放在 default 底下
+const FAQ_DATA = Array.isArray(faqRaw)
+  ? faqRaw
+  : Array.isArray(faqRaw?.default)
+  ? faqRaw.default
+  : [];
 
 // 字串正規化：全小寫、去空白
 function normalize(str) {
   return String(str ?? "")
     .toLowerCase()
-    .replace(/\s+/g, "");
+    .replace(/\s+/g, "")
+    .trim();
 }
 
 /**
@@ -46,7 +32,7 @@ export function matchFAQ(input, options = {}) {
   if (!text) return null;
 
   const { minScore = 0 } = options;
-  const faq = loadFAQ();
+  const faq = FAQ_DATA;
 
   let bestItem = null;
   let bestScore = 0;
@@ -97,7 +83,7 @@ export function extractVendorMeta(vendor) {
   }
 
   const v = normalize(vendor);
-  const faq = loadFAQ();
+  const faq = FAQ_DATA;
 
   let matchedItem = null;
 
