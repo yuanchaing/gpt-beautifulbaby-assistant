@@ -687,6 +687,35 @@ export const FAQ_DATA = [
       "traditional jerky"
     ],
     "a": "🍪 泰興肉脯佳里老店\n📍 台南市佳里區佳西路136號\n📞 06-723 5050\n🕐 週一～週日 09:00–19:00\n簡介：創立於1976 年在地深耕五十年的老字號肉乾專賣店 ☆ 秉持著「用好心腸作好香腸、好心肝作好肉乾」的精神，製作出各式肉乾、肉鬆、肉脯及古早味零嘴。\n🔗 https://taihsing.com/"
+  },{
+    "q": [
+      "DIY 活動需要預約嗎？",
+      "DIY 活動怎麼報名？",
+      "DIY 活動要預約嗎？",
+      "DIY 活動現場報名可以嗎？",
+      "DIY 活動預約方式？",
+      "DIY 活動如何預約？",
+      "do I need to book diy",
+      "how to book diy",
+      "diy booking method",
+      "can I sign up for diy on site",
+      "is diy by reservation only",
+      "how to reserve diy",
+      "diy reservation"
+    ],
+    "a": "DIY 活動採「預約優先」，現場若有名額也可報名。建議提前預約以確保時段。\n可透過官網預約系統或粉絲專頁，也可來電確認。洽詢電話：06-723 6320"
+  },{
+    "q": ["DIY 活動多長時間？", "DIY 活動時間？", "DIY 活動多久？", "DIY 活動時長？", "diy duration", "how long is diy", "diy time length", "diy activity duration", "diy activity length", "how long does diy take" ],
+    "a": "每場 DIY 活動約 45–60 分鐘，依課程內容略有不同。大部分課程非常適合親子共同參與。"
+  },{
+    "q": ["DIY 活動費用多少？", "DIY 活動價格？", "DIY 活動收費？", "DIY 活動價錢？", "diy price", "diy cost", "diy fee", "how much is diy", "diy activity price", "diy activity cost" ],
+    "a": "DIY 課程費用依主題不同，約 350–450 元不等。包含可使用提供的材料與工具與教學，不需額外費用。\n部分節慶課程價格將另行公告。"
+  },{
+    "q": ["DIY 成果可以帶回家嗎？", "DIY 作品可以帶回家嗎？", "DIY 成品可以帶回家嗎？", "DIY 作品能帶回家嗎？", "can I take diy home", "can I bring diy home", "diy take home", "diy bring home", "can I keep my diy", "can I keep my diy project"],
+    "a": "所有作品皆可現場享用或帶回家，我們會提供簡易包裝盒或袋子，方便攜帶。\n教室所提供的材料與工具則請勿攜帶離開，避免影響下一場DIY活動的流程時間，謝謝。"
+  },{
+    "q": ["團體可以預約 DIY 嗎？,", "團體可以參加 DIY 嗎？", "團體可以報名 DIY 嗎？", "團體如何預約 DIY？", "can groups book diy", "can groups join diy", "group diy booking", "group diy reservation", "how can groups book diy", "how can groups join diy"],
+    "a": "可接受 16–40 人團體預約，可依需求規劃客製課程與場地配置，有專人協助活動安排。\n請提前至少一週以上來電預約，洽詢電話：06-723 6320"
   }
 ];
 
